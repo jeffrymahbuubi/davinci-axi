@@ -41,7 +41,8 @@ FUSION_WRITES: frozenset[str] = frozenset(
     f"{cls}.{name}" for cls, names in _WRITES.items() for name in names.split()
 )
 
-_REGS = {"CT_Tool": "MediaIn MediaOut Blur Merge Transform TextPlus", "CT_Modifier": "BezierSpline"}
+_TOOLS = "MediaIn MediaOut Blur Merge Transform TextPlus FilmGrain ObjectRemoval"
+_REGS = {"CT_Tool": (1, _TOOLS), "CT_Modifier": (2, "BezierSpline")}
 
 
 class FakeFlowView(FakeBase):
@@ -286,13 +287,14 @@ class FakeComp(FakeBase):
 
 class FakeFusion(FakeBase):
     CLASS = "Fusion"
+    CT_Tool, CT_Modifier = 1, 2
 
     def __init__(self, world: FakeWorld) -> None:
         super().__init__(world)
         self.current: FakeComp | None = None
         entries = [
-            {"REGS_ID": rid, "REGS_Name": rid, "REGS_ClassType": kind}
-            for kind, ids in _REGS.items()
+            {"REGS_ID": rid, "REGS_Name": rid, "REGI_ClassType": mask}
+            for mask, ids in _REGS.values()
             for rid in ids.split()
         ]
         self.regs = [SimpleNamespace(attrs=e, GetAttrs=lambda e=e: dict(e)) for e in entries]
@@ -300,8 +302,10 @@ class FakeFusion(FakeBase):
     def GetCurrentComp(self) -> FakeComp | None:
         return self._ret("GetCurrentComp", self.current)
 
-    def GetRegList(self, regType: str | None = None) -> dict[int, SimpleNamespace]:
-        found = [r for r in self.regs if not regType or r.attrs["REGS_ClassType"] == regType]
+    def GetRegList(self, regType: int | str | None = None) -> dict[int, SimpleNamespace]:
+        """An int mask filters on `REGI_ClassType`; None or a string lists every entry (live)."""
+        mask = regType if isinstance(regType, int) and not isinstance(regType, bool) else None
+        found = [r for r in self.regs if mask is None or r.attrs["REGI_ClassType"] == mask]
         return self._ret("GetRegList", dict(enumerate(found, start=1)), regType)
 
     def GetRegAttrs(self, regId: str, regType: str | None = None) -> dict[str, Any] | None:

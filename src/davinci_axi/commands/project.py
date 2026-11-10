@@ -37,7 +37,7 @@ from davinci_axi.mutate import (
 )
 from davinci_axi.output import collapse_home, hint
 from davinci_axi.resolve_types_edit import ProjectEdit
-from davinci_axi.snapshot import Snapshot, take_snapshot
+from davinci_axi.snapshot import Snapshot, resolve_out, take_snapshot
 from davinci_axi.spec import CommandSpec, Flag, Invocation, Positional, Result
 
 DEFAULT_REASON = "manual"
@@ -65,11 +65,11 @@ def run_snapshot(inv: Invocation) -> Result:
             "flag --out needs a directory path",
             help=["Valid example: --out ~/snapshots/before-grade"],
         )
-    out = Path(out_text).expanduser() if out_text else None
+    out = resolve_out(out_text) if out_text else None
     reason = text_arg(inv, "reason") or DEFAULT_REASON
     with_stills_luts = not inv.args.get("no_stills_luts")
     snapshot = take_snapshot(
-        inv.connect(), reason=reason, out=out, with_stills_luts=with_stills_luts
+        inv.connect(), reason=reason, out=out, with_stills_luts=with_stills_luts, manual=True
     )
     timelines, items = _counts(snapshot)
     data: dict[str, object] = {
@@ -82,6 +82,8 @@ def run_snapshot(inv: Invocation) -> Result:
         "timelines": timelines,
         "items": items,
     }
+    if inv.args.get("force"):
+        data["force"] = "ignored (snapshot is disk-only and always runs)"
     help_lines: list[str] = []
     if "timelines" in registry.COMMANDS:
         help_lines.append(hint("timelines", "list the timelines in the live project"))
@@ -105,6 +107,16 @@ SNAPSHOT_SPEC = CommandSpec(
         Flag("out", "str", None, help="write the snapshot into this directory"),
         Flag("no-stills-luts", "bool", False, help="leave stills and LUTs out of the .drp"),
         Flag("reason", "str", None, help=f"note stored in meta.json (default {DEFAULT_REASON})"),
+        Flag(
+            "force",
+            "bool",
+            False,
+            help="accepted and ignored: a snapshot is disk-only and always runs",
+        ),
+    ),
+    notes=(
+        "No dry run and no --force gate: a snapshot never changes the project, it only writes "
+        "<dir>/<id>/ on disk; --force is accepted so recipes can keep it",
     ),
     examples=(
         "davinci-axi project snapshot",

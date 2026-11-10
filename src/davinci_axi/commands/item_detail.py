@@ -11,6 +11,7 @@ from typing import Any
 from davinci_axi.errors import not_found
 from davinci_axi.output import truncate
 from davinci_axi.resolve_types import TimelineApi, TimelineItemApi
+from davinci_axi.session import Session
 from davinci_axi.spec import TRUNCATE_CHARS, Invocation, Result
 from davinci_axi.toon import encode
 
@@ -19,6 +20,7 @@ PREFIX = {"video": "V", "audio": "A", "subtitle": "S"}
 BY_PREFIX = {prefix: track_type for track_type, prefix in PREFIX.items()}
 _SHORTHAND = re.compile(r"([VASvas])([0-9]+):([0-9]+)")
 _PRIMITIVE = (str, int, float, bool)
+FADES_MINIMUM = (21, 1, 0)
 
 
 @dataclass(frozen=True)
@@ -142,10 +144,27 @@ def _markers(item: TimelineItemApi) -> list[dict[str, object]]:
     ]
 
 
+def takes_count(item: TimelineItemApi) -> int:
+    """Resolve returns None for items without a take selector (audio items); treat it as 0."""
+    value = item.GetTakesCount()
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _fades(item: TimelineItemApi, session: Session) -> dict[str, object] | None:
+    """Fade lengths in frames; `None` before Resolve 21.1 (the API is not there)."""
+    if session.version < FADES_MINIMUM:
+        return None
+    fades = item.GetFades() or {}
+    return {"in": int(fades.get("FadeIn") or 0), "out": int(fades.get("FadeOut") or 0)}
+
+
 def _takes(item: TimelineItemApi) -> list[dict[str, object]]:
+    count = takes_count(item)
+    if count == 0:
+        return []
     selected = item.GetSelectedTakeIndex()
     rows: list[dict[str, object]] = []
-    for index in range(1, item.GetTakesCount() + 1):
+    for index in range(1, count + 1):
         take = item.GetTakeByIndex(index) or {}
         rows.append(
             {
@@ -164,6 +183,43 @@ def _media(item: TimelineItemApi) -> dict[str, object] | None:
         return None
     path = pool_item.GetClipProperty("File Path")
     return {"name": pool_item.GetName(), "path": str(path) if path else None}
+
+
+def is_transition(item: TimelineItemApi) -> bool:
+    """`GetType()` is `transition` (live, lower case) or `Transition` (fake)."""
+    return str(item.GetType() or "").lower() == "transition"
+
+
+def _num(value: object, kind: type) -> int | float | None:
+    """`kind(value)`; a getter that returns None (transitions have no source) stays None."""
+    return None if value is None else kind(value)
+
+
+def _side(track: str, position: int, item: TimelineItemApi) -> dict[str, object]:
+    return {
+        "id": item.GetUniqueId(),
+        "name": item.GetName(),
+        "track_ref": f"{track}:{position}",
+        "start": int(item.GetStart()),
+        "end": int(item.GetEnd()),
+    }
+
+
+def _sides(timeline: TimelineApi, located: Located) -> dict[str, dict[str, object] | None]:
+    """The clips a transition joins: the last clip starting before it and the first ending after."""
+    track_type, index = BY_PREFIX[located.track[0]], int(located.track[1:])
+    listed = timeline.GetItemListInTrack(track_type, index) or []
+    clips = sorted(
+        ((pos + 1, it) for pos, it in enumerate(listed) if not is_transition(it)),
+        key=lambda pair: int(pair[1].GetStart()),
+    )
+    t_start, t_end = int(located.item.GetStart()), int(located.item.GetEnd())
+    left = [pair for pair in clips if int(pair[1].GetStart()) < t_start]
+    right = [pair for pair in clips if int(pair[1].GetEnd()) > t_end]
+    return {
+        "left": _side(located.track, *left[-1]) if left else None,
+        "right": _side(located.track, *right[0]) if right else None,
+    }
 
 
 def run(inv: Invocation) -> Result:
@@ -188,19 +244,24 @@ def run(inv: Invocation) -> Result:
         "start": start,
         "end": int(item.GetEnd()),
         "duration": duration,
-        "source_start_time": float(item.GetSourceStartTime()),
-        "source_end_time": float(item.GetSourceEndTime()),
-        "left_offset": int(item.GetLeftOffset()),
-        "right_offset": int(item.GetRightOffset()),
+        "source_start_time": _num(item.GetSourceStartTime(), float),
+        "source_end_time": _num(item.GetSourceEndTime(), float),
+        "left_offset": _num(item.GetLeftOffset(), int),
+        "right_offset": _num(item.GetRightOffset(), int),
         "enabled": bool(item.GetClipEnabled()),
         "color": item.GetClipColor() or None,
         "flags": list(item.GetFlagList() or []),
         "media": _media(item),
         "properties": properties,
     }
+    if is_transition(item):
+        data["sides"] = _sides(timeline, located)
     if note is not None:
         data["properties_note"] = note
     data["markers"] = _markers(item)
+    fades = _fades(item, session)
+    if fades is not None:
+        data["fades"] = fades
     data["takes"] = _takes(item)
     data["fusion_comps"] = list(item.GetFusionCompNameList() or [])
     data["linked"] = _linked(item)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from davinci_axi import registry
 from davinci_axi.errors import AxiError
-from davinci_axi.output import apply_limit, empty_state, hint, select_fields
+from davinci_axi.output import apply_limit, empty_state, hint, page_meta, select_fields
 from davinci_axi.spec import LIST_FLAGS, CommandSpec, Invocation, Result
 
 DEFAULT_FIELDS = ("name", "modified", "current")
@@ -67,7 +67,7 @@ def run(inv: Invocation) -> Result:
         "db_type": database.get("DbType"),
         "folder": folder,
         "folders": list(manager.GetFolderListInCurrentFolder()),
-        "total": total,
+        **page_meta(len(page), total),
     }
     if page:
         data["projects"] = select_fields(page, DEFAULT_FIELDS, requested)

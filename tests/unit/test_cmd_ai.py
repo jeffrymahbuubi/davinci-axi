@@ -391,7 +391,10 @@ def test_status_lists_the_five_jobs(
     run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld
 ) -> None:
     code, out, err = run_cli(["ai", "status"])
-    assert (code, err) == (0, "") and "jobs[5]{job,status,percent,clip,eta_s,error}:" in out
+    assert (code, err) == (
+        0,
+        "",
+    ) and "jobs[5]{job,status,percent,clip,eta_s,error,last_error}:" in out
     assert parse_toon_keys(out)["busy"] == "none"
     for job in ("slate", "reframe", "scene-cuts", "subtitles", "transcribe"):
         assert f"{job},Inactive" in out
@@ -460,3 +463,14 @@ def test_help_for_every_ai_path_exits_zero(run_cli: Run) -> None:
     for path in paths:
         code, out, err = run_cli([*path, "--help"])
         assert code == 0 and err == "" and "examples[" in out, path
+
+
+def test_magic_mask_help_has_write_only_notes(run_cli: Run) -> None:
+    for path, phrase in (
+        (["ai", "magic-mask"], "Write-only"),
+        (["ai", "magic-mask", "create"], "read back"),
+        (["ai", "magic-mask", "regenerate"], "read back"),
+    ):
+        code, out, err = run_cli([*path, "--help"])
+        assert code == 0 and err == "", path
+        assert "notes[" in out and phrase in out, path

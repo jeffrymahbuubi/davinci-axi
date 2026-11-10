@@ -189,6 +189,9 @@ START_SPEC = CommandSpec(
         *POLL_FLAGS,
         *MUTATION_FLAGS,
     ),
+    notes=(
+        "No snapshot: the clone writes outside the project; the dry run and --force still apply",
+    ),
     examples=(
         "davinci-axi storage clone start /Volumes/Card /Volumes/A,/Volumes/B --checksum sha256",
         "davinci-axi storage clone start /Volumes/Card /Volumes/A --force --no-wait",

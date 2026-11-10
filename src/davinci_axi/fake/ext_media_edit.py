@@ -54,7 +54,9 @@ def _add_sub_folder(self: FakeMediaPool, folder: FakeFolder, name: str) -> FakeF
         return value if isinstance(value, FakeFolder) else None
     if not name or not _in_tree(self, folder) or any(c.name == name for c in folder.subfolders):
         return None
-    return folder.add_folder(name)
+    created = folder.add_folder(name)
+    self.current = created  # Resolve 21.1.1 makes the new folder current
+    return created
 
 
 def _set_current_folder(self: FakeMediaPool, folder: FakeFolder) -> bool:
@@ -204,12 +206,22 @@ def _set_metadata(self: FakeMediaPoolItem, metadata: dict[str, Any]) -> bool:
     return True
 
 
-def _set_clip_property(self: FakeMediaPoolItem, propertyName: str, propertyValue: str) -> bool:
-    injected, value = self._rec("SetClipProperty", propertyName, propertyValue)
+def _set_clip_property(
+    self: FakeMediaPoolItem, propertyName: str, propertyValue: Any, *extra: float
+) -> bool:
+    injected, value = self._rec("SetClipProperty", propertyName, propertyValue, *extra)
     if injected:
         return bool(value)
-    if not propertyName:
+    if not propertyName or propertyName in ("Resolution", "Frames", "File Path"):
         return False
+    if propertyName == "Super Scale":
+        if not isinstance(propertyValue, int) or isinstance(propertyValue, bool):
+            return False
+        if not 1 <= propertyValue <= 4:
+            return False
+        if extra:
+            self.properties["SuperScale Sharpness"] = str(extra[0])
+            self.properties["SuperScale Noise Reduction"] = str(extra[1])
     self.properties[propertyName] = propertyValue
     return True
 

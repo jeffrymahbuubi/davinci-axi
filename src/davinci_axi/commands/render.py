@@ -7,13 +7,19 @@ job uses: UI-level state with getters, so they are verified but take no snapshot
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from davinci_axi.commands.project_io import tree_bytes
 from davinci_axi.commands.render_common import render_project
+from davinci_axi.commands.render_deliver import DELIVER_SPEC
+from davinci_axi.commands.render_frame import FRAME_SPEC
 from davinci_axi.commands.render_jobs import JOB_SPECS
+from davinci_axi.commands.render_master import MASTER_SPEC
 from davinci_axi.commands.render_presets import PRESET_SPECS
+from davinci_axi.commands.render_settings import SETTINGS_SPEC
+from davinci_axi.commands.render_sheet import SHEET_SPEC
+from davinci_axi.commands.render_start import START_SPEC
+from davinci_axi.commands.render_status import SCOPE, STATUS_SPEC
+from davinci_axi.commands.render_verify import VERIFY_SPEC
 from davinci_axi.errors import AxiError, api_failed, not_found
 from davinci_axi.mutate import (
     MUTATION_FLAGS,
@@ -21,26 +27,14 @@ from davinci_axi.mutate import (
     MutationPlan,
     check_snapshot_flags,
     force_cmd,
-    refuse_existing,
     run_mutation,
-    with_page,
 )
-from davinci_axi.output import apply_limit, collapse_home, empty_state, hint, select_fields
+from davinci_axi.output import empty_state, hint
 from davinci_axi.resolve_types import ProjectApi
-from davinci_axi.spec import LIST_FLAGS, CommandSpec, Flag, Invocation, Positional, Result
+from davinci_axi.spec import CommandSpec, Flag, Invocation, Positional, Result
 
-SCOPE = "current project"
 RENDER_MODES = {0: "individual clips", 1: "single clip"}
 MODE_WORDS = {"individual": 0, "single": 1}
-STATUS_FIELDS = ("id", "name", "timeline", "status", "percent")
-EXTRA_FIELDS: dict[str, str] = {
-    "target_dir": "TargetDir",
-    "file": "OutputFilename",
-    "format": "VideoFormat",
-    "codec": "VideoCodec",
-    "width": "FormatWidth",
-    "height": "FormatHeight",
-}
 
 
 def _names(noun: str, names: list[str], project: ProjectApi) -> object:
@@ -65,47 +59,6 @@ def run_presets(inv: Invocation) -> Result:
     return Result(data, [hint("render status", "list the render queue and job progress")])
 
 
-def _job_row(project: ProjectApi, job: dict[str, Any]) -> dict[str, object]:
-    job_id = str(job.get("JobId", ""))
-    status = project.GetRenderJobStatus(job_id) or {}
-    row: dict[str, object] = {
-        "id": job_id,
-        "name": job.get("RenderJobName"),
-        "timeline": job.get("TimelineName"),
-        "status": status.get("JobStatus") or "unknown",
-        "percent": status.get("CompletionPercentage"),
-    }
-    for field, key in EXTRA_FIELDS.items():
-        row[field] = job.get(key)
-    return row
-
-
-def run_status(inv: Invocation) -> Result:
-    project = inv.connect().require_project()
-    rows = [_job_row(project, job) for job in project.GetRenderJobList() or []]
-    counts: dict[str, int] = {}
-    for row in rows:
-        status = str(row["status"])
-        counts[status] = counts.get(status, 0) + 1
-    data: dict[str, object] = {
-        "scope": SCOPE,
-        "rendering": bool(project.IsRenderingInProgress()),
-        "total": len(rows),
-    }
-    next_step = hint("render presets", "list the render presets")
-    if not rows:
-        data["jobs"] = empty_state("jobs", f"in project {project.GetName()}", {})
-        return Result(data, [next_step])
-    data["by_status"] = [{"status": s, "count": n} for s, n in counts.items()]
-    requested = cast("list[str] | None", inv.args.get("fields"))
-    page, total = apply_limit(rows, cast(int, inv.args.get("limit")))
-    data["jobs"] = select_fields(page, STATUS_FIELDS, requested)
-    help_lines = [next_step]
-    if total > len(page):
-        help_lines.insert(0, f"Showing {len(page)} of {total} jobs; raise --limit to see more")
-    return Result(data, help_lines)
-
-
 def _pairs(table: dict[str, Any], first: str, second: str) -> list[dict[str, object]]:
     return [{first: name, second: value} for name, value in table.items()]
 
@@ -118,12 +71,14 @@ def run_formats(inv: Invocation) -> Result:
         project.GetAudioRenderFormats() if audio else project.GetRenderFormats()
     ) or {}
     data: dict[str, object] = {"scope": SCOPE, "kind": kind}
-    data["formats"] = (
-        _pairs(formats, "name", "extension")
-        if formats
-        else empty_state(f"{kind} formats", f"in project {project.GetName()}", {})
-    )
     extension = inv.args.get("codecs")
+    wants_codecs = isinstance(extension, str) and bool(extension)
+    if not wants_codecs:
+        data["formats"] = (
+            _pairs(formats, "name", "extension")
+            if formats
+            else empty_state(f"{kind} formats", f"in project {project.GetName()}", {})
+        )
     help_lines: list[str] = []
     if isinstance(extension, str) and extension:
         codecs: dict[str, Any] = (
@@ -132,7 +87,10 @@ def run_formats(inv: Invocation) -> Result:
         if not codecs:
             known = ", ".join(str(e) for e in formats.values()) or "(none)"
             raise not_found("render format extension", extension, f"Extensions: {known}")
-        data["codecs_for"] = extension
+        named = next((name for name, ext in formats.items() if ext == extension), None)
+        if named is not None:
+            data["format"] = named
+        data["extension"] = extension
         data["codecs"] = _pairs(codecs, "name", "codec")
         help_lines.append(hint(f"render format set {extension} <codec>", "select a codec"))
     if inv.args.get("resolutions"):
@@ -179,6 +137,7 @@ def run_format_set(inv: Invocation) -> Result:
         force_cmd=force_cmd(inv, "render", "format", "set", given, inv.positionals["codec"]),
         snapshot="none",
         next=[hint("render presets", "check the current format and codec")],
+        extra={} if changes else {"note": "already selected"},
     )
 
     def apply() -> None:
@@ -225,37 +184,6 @@ def run_mode_set(inv: Invocation) -> Result:
     return run_mutation(inv, session, plan, apply, verify)
 
 
-def run_frame(inv: Invocation) -> Result:
-    path = Path(inv.positionals["file"]).expanduser().resolve()
-    if path.is_dir():
-        raise AxiError(
-            "VALIDATION_ERROR",
-            f"{collapse_home(path)} is a directory",
-            help=["Pass a file path such as ~/frame.png"],
-        )
-    refuse_existing(path, bool(inv.args.get("overwrite")))
-    session = inv.connect()
-    project = render_project(session)
-    timeline = session.require_timeline(None)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with with_page(session, "color") as switched:
-        exported = project.ExportCurrentFrameAsStill(str(path))
-    if not exported:
-        raise api_failed("ExportCurrentFrameAsStill", "could not export the current frame")
-    if not path.exists():
-        raise api_failed(
-            "ExportCurrentFrameAsStill", f"Resolve reported success but wrote no {path.name}"
-        )
-    data: dict[str, object] = {
-        "timeline": timeline.GetName(),
-        "path": collapse_home(path),
-        "bytes": tree_bytes(path),
-    }
-    if switched:
-        data["page_restored"] = True
-    return Result(data)
-
-
 PRESETS_SPEC = CommandSpec(
     name="presets",
     summary="List render presets, quick export presets and the current format and codec",
@@ -270,27 +198,9 @@ PRESETS_SPEC = CommandSpec(
     ),
 )
 
-STATUS_SPEC = CommandSpec(
-    name="status",
-    summary="List render queue jobs with status and completion",
-    run=run_status,
-    flags=LIST_FLAGS,
-    examples=(
-        "davinci-axi render status",
-        "davinci-axi render status --fields id,status,target_dir,file",
-        "davinci-axi render status --limit 5",
-    ),
-    methods=(
-        "Project.GetName",
-        "Project.GetRenderJobList",
-        "Project.GetRenderJobStatus",
-        "Project.IsRenderingInProgress",
-    ),
-)
-
 FORMATS_SPEC = CommandSpec(
     name="formats",
-    summary="List render formats, the codecs of one format and the resolutions",
+    summary="List render formats, or the codecs of one format, and the resolutions",
     run=run_formats,
     flags=(
         Flag("codecs", "str", None, help="list the codecs of this format extension, e.g. mov"),
@@ -302,6 +212,7 @@ FORMATS_SPEC = CommandSpec(
         "davinci-axi render formats --codecs mov",
         "davinci-axi render formats --audio --codecs wav --resolutions",
     ),
+    notes=("--codecs prints only that format's codecs; leave it out to list every format",),
     methods=(
         "Project.GetName",
         "Project.GetRenderFormats",
@@ -310,20 +221,6 @@ FORMATS_SPEC = CommandSpec(
         "Project.GetAudioRenderCodecs",
         "Project.GetRenderResolutions",
     ),
-)
-
-FRAME_SPEC = CommandSpec(
-    name="frame",
-    summary="Export the current frame of the current timeline as a still file",
-    run=run_frame,
-    positionals=(Positional("file", help="output image file"),),
-    flags=(Flag("overwrite", "bool", False, help="replace the file if it exists"),),
-    examples=(
-        "davinci-axi render frame ~/frame.png",
-        "davinci-axi render frame ~/f.png --overwrite",
-    ),
-    reads_only=False,
-    methods=("Resolve.GetCurrentPage", "Resolve.OpenPage", "Project.ExportCurrentFrameAsStill"),
 )
 
 FORMAT_SET_SPEC = CommandSpec(
@@ -335,6 +232,9 @@ FORMAT_SET_SPEC = CommandSpec(
         Positional("codec", help="codec name or description (see `render formats --codecs`)"),
     ),
     flags=MUTATION_FLAGS,
+    notes=(
+        "If the format and codec are already selected the result says `note: already selected`",
+    ),
     examples=(
         "davinci-axi render format set mp4 H265",
         "davinci-axi render format set mov H264 --force",
@@ -366,7 +266,14 @@ SUBCOMMANDS: dict[str, CommandSpec] = {
     "presets": PRESETS_SPEC,
     "status": STATUS_SPEC,
     "formats": FORMATS_SPEC,
-    **JOB_SPECS,
+    "add": JOB_SPECS["add"],
+    "start": START_SPEC,
+    "stop": JOB_SPECS["stop"],
+    "delete": JOB_SPECS["delete"],
+    "deliver": DELIVER_SPEC,
+    "verify": VERIFY_SPEC,
+    "master": MASTER_SPEC,
+    "sheet": SHEET_SPEC,
     "quick-export": PRESET_SPECS["quick-export"],
     "frame": FRAME_SPEC,
     "format": CommandSpec(
@@ -385,6 +292,7 @@ SUBCOMMANDS: dict[str, CommandSpec] = {
         reads_only=False,
         methods=MODE_SET_SPEC.methods,
     ),
+    "settings": SETTINGS_SPEC,
     "preset": PRESET_SPECS["preset"],
 }
 
@@ -396,6 +304,10 @@ SPEC = CommandSpec(
         "davinci-axi render status",
         "davinci-axi render add --target-dir ~/renders --mkdir",
         "davinci-axi render start job-2 --force",
+        "davinci-axi render verify ~/out/edit.mp4 --max-mb 50 --lufs -14",
+        "davinci-axi render start job-2 --force --verify --max-mb 6",
+        "davinci-axi render master ~/out/edit.mp4 --lufs -14",
+        "davinci-axi render sheet ~/out/edit.mp4 --every 10",
     ),
     reads_only=False,
     methods=tuple(dict.fromkeys(m for spec in SUBCOMMANDS.values() for m in spec.methods)),

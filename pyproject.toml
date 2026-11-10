@@ -1,6 +1,6 @@
 [project]
 name = "davinci-axi"
-version = "0.1.0"
+version = "0.2.0"
 description = "Agent-ergonomic CLI for DaVinci Resolve Studio"
 readme = "README.md"
 license = "MIT"
@@ -9,6 +9,7 @@ dependencies = []
 
 [project.optional-dependencies]
 otio = ["opentimelineio>=0.18,<0.19"]
+sheet = ["pillow>=10"]
 
 [project.scripts]
 davinci-axi = "davinci_axi.cli:main"
@@ -18,7 +19,7 @@ requires = ["uv_build>=0.9.26,<0.10"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = ["pytest>=9,<10", "ruff>=0.17", "mypy>=2.4"]
+dev = ["pytest>=9,<10", "ruff>=0.17", "mypy>=2.4", "pillow>=10"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

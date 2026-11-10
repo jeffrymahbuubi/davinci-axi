@@ -17,8 +17,9 @@ from typing import Any, cast
 
 from davinci_axi.fake import ext_edit_extra_item
 from davinci_axi.fake.core import FakeResolve
-from davinci_axi.fake.ext_edit_extra_item import frames_of
+from davinci_axi.fake.ext_edit_extra_item import FPS, frames_of
 from davinci_axi.fake.ext_writes_core import owner_project
+from davinci_axi.fake.insert_place import place_insert
 from davinci_axi.fake.media import FakeMediaPool, FakeMediaPoolItem
 from davinci_axi.fake.timeline import FakeTimeline, FakeTimelineItem
 
@@ -140,7 +141,31 @@ def _create_compound_clip(
             track.items.remove(item)
     name = str((clipInfo or {}).get("name") or "Compound Clip 1")
     return self.add_item(
-        first.track_type, first.track_index, name, start, end - start, kind="Compound"
+        first.track_type,
+        first.track_index,
+        name,
+        start,
+        end - start,
+        media=_compound_clip(self, name, end - start),
+        kind="Compound",
+    )
+
+
+def _compound_clip(timeline: FakeTimeline, name: str, frames: int) -> FakeMediaPoolItem | None:
+    """Live the compound also lands in the media pool's current folder; the fake adds it too."""
+    project = timeline._world.resolve.pm.current_project
+    if project is None or timeline not in project.timelines:
+        return None
+    seconds, rest = divmod(frames, FPS)  # frames_of reads `Duration` back at 24 fps
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return project.media_pool.current.add_clip(
+        name,
+        "",
+        duration=f"{hours:02d}:{minutes:02d}:{seconds:02d}:{rest:02d}",
+        fps=str(int(timeline.settings.get("timelineFrameRate") or FPS)),
+        clip_type="Compound",
+        frames=str(frames),
     )
 
 
@@ -148,13 +173,7 @@ def _insert(self: FakeTimeline, method: str, kind: str, name: str) -> FakeTimeli
     injected, value = self._rec(method, name)
     if injected:
         return value if isinstance(value, FakeTimelineItem) else None
-    track = self._track("video", 1)
-    if not name or track is None or track.locked:
-        return None
-    start = _track_end(self, "video", 1) if track.items else self.start_frame
-    item = self.add_item("video", 1, name, start, GENERATOR_FRAMES, kind=kind)
-    _grow(self, start + GENERATOR_FRAMES)
-    return item
+    return place_insert(self, name, kind)
 
 
 def _insert_generator(self: FakeTimeline, generatorName: str) -> FakeTimelineItem | None:

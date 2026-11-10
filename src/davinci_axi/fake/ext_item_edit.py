@@ -59,9 +59,17 @@ def _set_fades(self: FakeTimelineItem, fades: dict[str, Any]) -> bool:
         return bool(value)
     if not fades or any(key not in FADE_KEYS for key in fades):
         return False
-    if "FadeIn" not in self.fades:
-        self.fades = {"FadeIn": 0, "FadeOut": 0}
-    self.fades.update(fades)
+    if any(not isinstance(v, int) or isinstance(v, bool) or v < 0 for v in fades.values()):
+        return False
+    current = self.fades if "FadeIn" in self.fades else {"FadeIn": 0, "FadeOut": 0}
+    cap = max(self.duration - 1, 0)
+    merged = {**current, **{key: min(v, cap) for key, v in fades.items()}}
+    total = merged["FadeIn"] + merged["FadeOut"]
+    if total > self.duration:  # F38 live: a sum over the item length is refused
+        return False
+    if total == self.duration:  # F42 live: a sum equal to the length is accepted, fade-out trimmed
+        merged["FadeOut"] = max(merged["FadeOut"] - 1, 0)
+    self.fades = merged
     return True
 
 

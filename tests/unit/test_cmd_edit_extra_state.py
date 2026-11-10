@@ -228,9 +228,15 @@ MUTATIONS: list[tuple[list[str], str]] = [
     (["timeline", "append", "A003_dusk"], "MediaPool.AppendToTimeline"),
     (["timeline", "build", "scratch", "A001_beach"], "MediaPool.CreateTimelineFromClips"),
     (["timeline", "compound", "V1:1,V1:2"], "Timeline.CreateCompoundClip"),
-    (["timeline", "insert", "title", "Text"], "Timeline.InsertTitleIntoTimeline"),
-    (["timeline", "insert", "generator", "Solid"], "Timeline.InsertGeneratorIntoTimeline"),
-    (["timeline", "insert", "ofx", "Noise"], "Timeline.InsertOFXGeneratorIntoTimeline"),
+    (["timeline", "insert", "title", "Text", "--allow-ripple"], "Timeline.InsertTitleIntoTimeline"),
+    (
+        ["timeline", "insert", "generator", "Solid", "--allow-ripple"],
+        "Timeline.InsertGeneratorIntoTimeline",
+    ),
+    (
+        ["timeline", "insert", "ofx", "Noise", "--allow-ripple"],
+        "Timeline.InsertOFXGeneratorIntoTimeline",
+    ),
     (["timeline", "blanking", "set", "Top=10"], "Timeline.SetOutputBlanking"),
     (["timeline", "stereo", "convert"], "Timeline.ConvertTimelineToStereo"),
     (["timeline", "dolby-vision", "analyze", "V1:1"], "Timeline.AnalyzeDolbyVision"),

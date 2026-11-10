@@ -8,6 +8,7 @@ import pytest
 
 from davinci_axi import fusion_guard, registry
 from davinci_axi.commands import fusion
+from davinci_axi.errors import AxiError
 from davinci_axi.fake import FakeWorld, ext_fusion
 from davinci_axi.fake.ext_fusion import FakeComp
 from davinci_axi.fake.timeline import FakeTimelineItem
@@ -148,11 +149,25 @@ def test_tool_show_lists_inputs_and_outputs(run_cli: Run, fake_world: FakeWorld)
     code, out, _ = run_cli(["fusion", "tool", "show", "MediaOut1", "--item", "V1:2"])
     assert code == 0
     assert "tool: MediaOut1" in out and "id: MediaOut" in out
-    assert "inputs[2]{id,name,type,value}:" in out
-    assert "  Input,Input,Image,null" in out and "  Index,Index,Number,0" in out
+    assert "inputs[2]{id,name,type,value,source}:" in out
+    assert "  Input,Input,Image,null,MediaIn1.Output" in out
+    assert "  Index,Index,Number,0,null" in out
     assert "outputs[1]{id,name,connected}:" in out
     # image inputs are not read: only the number input is asked for its value
     assert [a[0] for _, m, a in fake_world.calls if m == "GetInput"] == ["Index"]
+
+
+def test_tool_show_source_is_null_when_unconnected_and_selectable(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    _comp(fake_world).tools[1].inputs[0].connected = None
+    _, out, _ = run_cli(["fusion", "tool", "show", "MediaOut1", "--item", "V1:2"])
+    assert "  Input,Input,Image,null,null" in out
+    _comp(fake_world).tools[1].inputs[0].connected = _comp(fake_world).tools[0].outputs[0]
+    _, out, _ = run_cli(
+        ["fusion", "tool", "show", "MediaOut1", "--item", "V1:2", "--fields", "id,source"]
+    )
+    assert "inputs[2]{id,source}:" in out and "  Input,MediaIn1.Output" in out
 
 
 def test_tool_show_marks_a_connected_output_and_applies_the_limit(
@@ -232,14 +247,62 @@ def test_active_and_item_together_exit_2(run_cli: Run, fake_world: FakeWorld) ->
     assert code == 2 and "--item" in out and fake_world.calls == []
 
 
-def test_registry_lists_ids_and_filters_by_type(run_cli: Run, fake_world: FakeWorld) -> None:
+def test_registry_lists_every_entry_without_a_type(run_cli: Run, fake_world: FakeWorld) -> None:
     code, out, _ = run_cli(["fusion", "registry"])
-    assert code == 0 and "total: 7" in out and "registry[7]{id,name}:" in out
+    assert code == 0 and "total: 9" in out and "shown: 9" in out and "registry[9]{id,name}:" in out
     assert "  TextPlus,TextPlus" in out
-    _, out, _ = run_cli(["fusion", "registry", "--type", "CT_Modifier"])
-    assert "registry[1]" in out and "BezierSpline" in out
-    _, out, _ = run_cli(["fusion", "registry", "--type", "CT_Nothing"])
-    assert "0 registry entries in Fusion (filters: type=CT_Nothing)" in out
+    assert fake_world.calls_to("Fusion.GetRegList") == [(None,)]
+
+
+def test_registry_type_sends_the_integer_mask(run_cli: Run, fake_world: FakeWorld) -> None:
+    code, out, _ = run_cli(["fusion", "registry", "--type", "CT_Modifier"])
+    assert (
+        code == 0 and "registry[1]" in out and "BezierSpline" in out and "type: CT_Modifier" in out
+    )
+    assert fake_world.calls_to("Fusion.GetRegList") == [(2,)]
+    _, out, _ = run_cli(["fusion", "registry", "--type", "CT_Tool"])
+    assert "registry[8]" in out and "BezierSpline" not in out
+
+
+def test_registry_unknown_type_is_refused_before_any_resolve_call(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    code, out, _ = run_cli(["fusion", "registry", "--type", "CT_Nothing"])
+    assert code == 2 and "unknown registry type CT_Nothing" in out and "CT_Tool" in out
+    assert fake_world.calls == []
+
+
+def test_reg_mask_needs_an_integer_attribute() -> None:
+    class App:
+        CT_Tool = 1
+        CT_Modifier = 2.0  # Fusion's Python bridge hands numbers over as floats
+        CT_Bool = True
+        CT_Text = "x"
+        CT_Half = 1.5
+
+    assert fusion.reg_mask(App(), "CT_Tool") == 1
+    assert fusion.reg_mask(App(), "CT_Modifier") == 2
+    for name in ("CT_Bool", "CT_Text", "CT_Missing", "CT_Half"):
+        with pytest.raises(AxiError):
+            fusion.reg_mask(App(), name)
+
+
+def test_registry_search_matches_id_or_name_case_insensitively(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    _, out, _ = run_cli(["fusion", "registry", "--search", "grain"])
+    assert "registry[1]{id,name}:" in out and "FilmGrain" in out and "search: grain" in out
+    assert "total: 1" in out
+    _, out, _ = run_cli(["fusion", "registry", "--search", "REMOVAL"])
+    assert "registry[1]" in out and "ObjectRemoval" in out
+    _, out, _ = run_cli(["fusion", "registry", "--search", "zzz"])
+    assert "0 registry entries in Fusion (filters: search=zzz)" in out and "search: zzz" in out
+
+
+def test_registry_limit_reports_shown_and_total(run_cli: Run) -> None:
+    _, out, _ = run_cli(["fusion", "registry", "--limit", "2"])
+    assert "shown: 2" in out and "total: 9" in out and "registry[2]" in out
+    assert "Showing 2 of 9 entries" in out
 
 
 def test_undo_stack_empty_state_and_entries(

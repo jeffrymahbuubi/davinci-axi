@@ -108,6 +108,11 @@ class FakeGraph(FakeBase):
         if gradeMode not in (0, 1, 2) or not Path(path).is_file():
             return False
         self.drx.append((path, gradeMode, bool(applyToAllLayers)))
+        if not self.nodes:  # a DRX gives an empty graph its first node (F20)
+            cache = int(self._world.resolve.CACHE_AUTO_ENABLED)  # type: ignore[attr-defined]
+            self.nodes.append(
+                {"label": "Node 1", "tools": [], "lut": "", "cache": cache, "enabled": True}
+            )
         return True
 
     def ResetAllGrades(self) -> bool:
@@ -125,6 +130,20 @@ def _graph(owner: FakeBase, key: object, labels: list[str]) -> FakeGraph:
     if key not in graphs:
         graphs[key] = FakeGraph(owner._world, labels)
     return graphs[key]
+
+
+def empty_graph(owner: FakeBase, key: object) -> FakeGraph:
+    """Model a graph the API reports with 0 nodes (a new timeline or group graph, F20).
+
+    `key` is `"timeline"` or a layer number on a timeline or item; `"pre"` or `"post"` on a
+    colour group.
+    """
+    graph = FakeGraph(owner._world, [])
+    if isinstance(owner, FakeColorGroup) and key in ("pre", "post"):
+        setattr(owner, str(key), graph)
+    else:
+        owner.__dict__.setdefault("graphs", {})[key] = graph
+    return graph
 
 
 class FakeColorGroup(FakeBase):
@@ -388,4 +407,4 @@ def extend() -> None:
     extend_gallery()
 
 
-__all__ = ["FakeColorGroup", "FakeGraph", "extend"]
+__all__ = ["FakeColorGroup", "FakeGraph", "empty_graph", "extend"]

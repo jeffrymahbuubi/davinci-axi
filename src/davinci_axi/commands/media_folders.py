@@ -153,11 +153,17 @@ def where_is(ctx: Ctx, uid: str) -> str | None:
     return None
 
 
+TARGET_NAMES = 5
+
+
 def clips_target(found: list[Found]) -> str:
     if len(found) == 1:
         return f"clip {found[0].clip.GetName()} ({found[0].clip.GetUniqueId()})"
-    names = ", ".join(f.clip.GetName() for f in found)
-    return f"{len(found)} clips ({names})"
+    names = [f.clip.GetName() for f in found]
+    if len(names) > TARGET_NAMES:
+        more = len(names) - TARGET_NAMES
+        return f"{len(found)} clips ({', '.join(names[:TARGET_NAMES])} and {more} more)"
+    return f"{len(found)} clips ({', '.join(names)})"
 
 
 def field_names(found: list[Found], suffix: str = "") -> list[str]:
@@ -216,7 +222,7 @@ def run_folder_add(inv: Invocation) -> Result:
             "the folder name is empty or contains a /",
             help=["Valid example: davinci-axi media folder add Dailies"],
         )
-    parent_ref = str_arg(inv, "in")
+    parent_ref = str_arg(inv, "parent")
     ctx = open_pool(inv)
     parent_path, parent = (
         resolve_folder(ctx, parent_ref) if parent_ref else (ctx.root.GetName(), ctx.root)
@@ -224,7 +230,7 @@ def run_folder_add(inv: Invocation) -> Result:
     path = f"{parent_path}/{name}"
     if any(child.GetName() == name for child in parent.GetSubFolderList() or []):
         raise _folder_exists(name, path)
-    words = ["media", "folder", "add", name, *(["--in", parent_ref] if parent_ref else [])]
+    words = ["media", "folder", "add", name, *(["--parent", parent_ref] if parent_ref else [])]
     plan = MutationPlan(
         command="media folder add",
         target=f"media pool folder {parent_path}",
@@ -234,8 +240,12 @@ def run_folder_add(inv: Invocation) -> Result:
     )
 
     def apply() -> None:
+        previous = ctx.pool.GetCurrentFolder()
         if ctx.pool.AddSubFolder(parent, name) is None:
             raise api_failed("MediaPool.AddSubFolder", f"could not create folder {path}")
+        # Resolve 21.1.1 makes the new folder current; put the previous one back (like import).
+        if ctx.pool.GetCurrentFolder().GetUniqueId() != previous.GetUniqueId():
+            plan.extra["current_folder_restored"] = bool(ctx.pool.SetCurrentFolder(previous))
 
     def verify() -> dict[str, object]:
         listed = [c.GetName() for c in parent.GetSubFolderList() or []]
@@ -289,7 +299,14 @@ def run_folder_move(inv: Invocation) -> Result:
     path, folder = resolve_folder(ctx, ref)
     to_path, to_folder = resolve_folder(ctx, to_ref)
     if folder.GetUniqueId() == ctx.root.GetUniqueId():
-        raise AxiError("WRITE_REFUSED", f"the root folder {path} cannot be moved")
+        raise AxiError(
+            "WRITE_REFUSED",
+            f"the root folder {path} cannot be moved",
+            help=[
+                "Name a folder below the root, for example:",
+                "davinci-axi media folder move Master/Day1 --to Archive",
+            ],
+        )
     if to_path == path or to_path.startswith(path + "/"):
         raise AxiError(
             "VALIDATION_ERROR",
@@ -338,6 +355,7 @@ def verb_spec(
     flags: tuple[Flag, ...],
     examples: tuple[str, ...],
     methods: tuple[str, ...],
+    notes: tuple[str, ...] = (),
 ) -> CommandSpec:
     return CommandSpec(
         name=name,
@@ -348,6 +366,7 @@ def verb_spec(
         examples=examples,
         reads_only=False,
         methods=methods,
+        notes=notes,
     )
 
 
@@ -356,12 +375,24 @@ FOLDER_ADD_SPEC = verb_spec(
     "Create a folder in the media pool",
     run_folder_add,
     (Positional("name", help="name of the new folder"),),
-    (Flag("in", "str", None, help="parent folder path (default: the root folder)"),),
+    (
+        Flag(
+            "parent",
+            "str",
+            None,
+            help="parent folder path (default: the root folder)",
+            renamed_from="in",
+        ),
+    ),
     (
         "davinci-axi media folder add Dailies",
-        "davinci-axi media folder add Day2 --in Master --force",
+        "davinci-axi media folder add Day2 --parent Master --force",
     ),
-    (POOL + "AddSubFolder",),
+    (POOL + "AddSubFolder", POOL + "GetCurrentFolder", POOL + "SetCurrentFolder"),
+    (
+        "Resolve 21.1.1 makes the new folder current; the command puts the previous folder "
+        "back (current_folder_restored)",
+    ),
 )
 FOLDER_DELETE_SPEC = verb_spec(
     "delete",

@@ -223,22 +223,24 @@ def test_clip_create_validates_its_items(run_cli: Run, fake_world: FakeWorld) ->
 def test_insert_adds_one_item_and_warns_about_the_track_selector(
     run_cli: Run, fake_world: FakeWorld, tmp_path: Path, argv: list[str], call: str, name: str
 ) -> None:
-    code, data = _json(run_cli, ["fusion", "insert", *argv])
+    code, data = _json(run_cli, ["fusion", "insert", *argv, "--allow-ripple"])
     assert (
         code == 0 and data["applied"] is False and "Source Track Selector" in str(data["warning"])
     )
     _untouched(fake_world, tmp_path)
-    code, data = _json(run_cli, ["fusion", "insert", *argv, "--force"])
+    code, data = _json(run_cli, ["fusion", "insert", *argv, "--allow-ripple", "--force"])
     assert code == 0 and data["applied"] is True
-    inserted = _timeline(fake_world).tracks["video"][0].items[-1]
-    assert inserted.name == name
-    assert data["item"] == "V1:4" and data["item_id"] == inserted.GetUniqueId()
+    v1 = _timeline(fake_world).tracks["video"][0].items
+    inserted = next(i for i in v1 if i.name == name)
+    position = v1.index(inserted) + 1
+    assert data["item"] == f"V1:{position}" and data["item_id"] == inserted.GetUniqueId()
+    assert data["changes"] == [{"field": argv[0], "before": None, "after": f"V1@{inserted.start}"}]
     assert fake_world.calls_to(f"Timeline.{call}") == [tuple(argv[1:])]
 
 
 def test_insert_on_a_locked_track_is_api_failed(run_cli: Run, fake_world: FakeWorld) -> None:
     _timeline(fake_world).tracks["video"][0].locked = True
-    code, out, _ = run_cli(["fusion", "insert", "title", "Text+", "--force"])
+    code, out, _ = run_cli(["fusion", "insert", "title", "Text+", "--allow-ripple", "--force"])
     assert code == 1 and "API_FAILED" in out and "locked" in out
     assert len(_timeline(fake_world).tracks["video"][0].items) == 3
 
@@ -315,3 +317,76 @@ def test_every_fusion_path_has_help_and_examples(run_cli: Run, fake_world: FakeW
         assert (code, err) == (0, ""), path
         assert "examples[" in out, path
     assert fake_world.calls == []
+
+
+def test_comp_delete_of_the_only_comp_warns_ahead_and_explains_a_refusal(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    code, data = _json(run_cli, ["fusion", "comp", "delete", "Composition 1", *ITEM])
+    assert code == 0 and data["applied"] is False and data["only_comp"] is True
+    assert "only comp" in str(data["warning"])
+    fake_world.inject("TimelineItem.DeleteFusionCompByName", False)
+    code, out, _ = run_cli(["fusion", "comp", "delete", "Composition 1", *ITEM, "--force"])
+    assert code == 1 and "API_FAILED" in out and "pass-through" in out and "snapshot" in out
+    assert _calls(fake_world, ("TimelineItem.ExportFusionComp",)) != []
+    assert _clip(fake_world, 2).comps == ["Composition 1"]
+
+
+def test_comp_delete_loads_another_comp_first_only_when_the_target_is_active(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    clip = _clip(fake_world, 2)
+    clip.comps.append("Composition 2")
+    ext_fusion.fusion_of(fake_world).current = ext_fusion.comp_of(clip, "Composition 1")
+    fake_world.calls.clear()
+    code, data = _json(run_cli, ["fusion", "comp", "delete", "Composition 1", *ITEM, "--force"])
+    assert code == 0 and data["applied"] is True and data["only_comp"] is False
+    assert data["loaded_first"] == "Composition 2"
+    assert fake_world.calls_to("TimelineItem.LoadFusionCompByName") == [("Composition 2",)]
+    order = _calls(
+        fake_world,
+        ("TimelineItem.LoadFusionCompByName", "TimelineItem.DeleteFusionCompByName"),
+    )
+    assert order == ["TimelineItem.LoadFusionCompByName", "TimelineItem.DeleteFusionCompByName"]
+    clip.comps.append("Composition 3")
+    ext_fusion.fusion_of(fake_world).current = ext_fusion.comp_of(clip, "Composition 2")
+    fake_world.calls.clear()
+    code, data = _json(run_cli, ["fusion", "comp", "delete", "Composition 3", *ITEM, "--force"])
+    assert code == 0 and "loaded_first" not in data
+    assert fake_world.calls_to("TimelineItem.LoadFusionCompByName") == []
+
+
+def test_comp_add_warns_about_21_1_1_and_only_the_first_comp_is_permanent(run_cli: Run) -> None:
+    code, data = _json(run_cli, ["fusion", "comp", "add", *BARE])
+    assert code == 0 and "permanent" in str(data["warning"]) and "21.1.1" in str(data["warning"])
+    code, data = _json(run_cli, ["fusion", "comp", "add", *ITEM])
+    assert code == 0 and "permanent" not in str(data["warning"])
+    assert fusion_comp.ITEM_COMP_NOTE in str(data["warning"])
+
+
+def test_comp_add_reads_back_adoption_and_the_count(run_cli: Run, fake_world: FakeWorld) -> None:
+    code, data = _json(run_cli, ["fusion", "comp", "add", *ITEM, "--force"])
+    assert code == 0 and data["applied"] is True and data["adopted"] is True
+    assert data["count"] == len(_clip(fake_world, 2).comps) == 2
+
+
+def test_comp_add_reports_an_unadopted_comp_without_failing(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    fake_world.inject("TimelineItem.GetFusionCompCount", 0)
+    code, out, _ = run_cli(["fusion", "comp", "add", *ITEM, "--force", "--json"])
+    data = json.loads(out)
+    assert code == 0 and data["adopted"] is False and data["count"] == 0
+    assert "does not list the new comp" in "\n".join(data.get("help", []))
+
+
+def test_comp_add_help_names_adopted_and_the_observed_limits(run_cli: Run) -> None:
+    code, out, _ = run_cli(["fusion", "comp", "add", "--help"])
+    assert code == 0 and "adopted" in out and "--via-page" in out and "21.1.1" in out
+    assert " ".join(fusion_comp.ITEM_COMP_NOTE.split()[:6]) in " ".join(out.split())
+
+
+def test_fusion_notes_state_the_observed_ladder_result_without_cache_off(run_cli: Run) -> None:
+    code, out, _ = run_cli(["fusion", "--help"])
+    assert code == 0 and "no ladder step changed the render" in " ".join(out.split())
+    assert "auto|enabled|disabled" in out and "cache set off" not in out

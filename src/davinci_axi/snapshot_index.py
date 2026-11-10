@@ -30,6 +30,7 @@ class SnapshotMeta:
     resolve_version: str
     drp: Path | None
     state: Path | None
+    manual: bool | None = None  # None: written before the key existed (legacy)
 
 
 def _text(meta: dict[str, object], key: str) -> str:
@@ -52,6 +53,7 @@ def _read(directory: Path) -> SnapshotMeta:
         resolve_version=_text(raw, "resolve_version"),
         drp=drp if drp.is_file() else None,
         state=state if state.is_file() else None,
+        manual=raw["manual"] if isinstance(raw.get("manual"), bool) else None,
     )
 
 

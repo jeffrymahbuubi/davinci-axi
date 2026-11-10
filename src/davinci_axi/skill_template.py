@@ -30,7 +30,8 @@ OUTPUT_NOTES = (
     "- Errors print `error`, `code` and `help[]` on stdout. Exit codes: `0` ok, `1` runtime "
     "error, `2` usage error.",
     "- Connection failures carry one of `RESOLVE_NOT_INSTALLED`, `RESOLVE_NOT_RUNNING`, "
-    "`SCRIPTING_DISABLED` or `FREE_EDITION`; the `help[]` line says how to fix it.",
+    "`SCRIPTING_DISABLED`, `RESOLVE_STARTING` or `FREE_EDITION`; the `help[]` line says how "
+    "to fix it.",
     "- Run `davinci-axi <command> --help` for the flags and examples of one command.",
 )
 
@@ -83,7 +84,10 @@ def _table(rows: list[tuple[str, str, str]]) -> list[str]:
 
 def _flag_line(flag: Flag) -> str:
     name = flag.name.lstrip("-")
-    label = f"--{name}" if flag.kind == "bool" else f"--{name} <{flag.kind}>"
+    if flag.kind == "bool":
+        label = f"--{name}/--no-{name}" if flag.default is True else f"--{name}"
+    else:
+        label = f"--{name} <{flag.kind}>"
     has_default = flag.default is not None and flag.default is not False
     default = f" (default {flag.default})" if has_default else ""
     return f"- `{label}`{default}: {flag.help}"

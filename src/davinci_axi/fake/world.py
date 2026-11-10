@@ -106,7 +106,9 @@ WRITE_METHODS: frozenset[str] = frozenset(
     f"{cls}.{name}" for cls, names in _WRITES.items() for name in names.split()
 )
 
-Connection = Literal["ok", "not_running", "scripting_disabled", "free", "not_installed", "hang"]
+Connection = Literal[
+    "ok", "not_running", "scripting_disabled", "free", "not_installed", "hang", "starting"
+]
 HANG_SECONDS = 3.0
 
 
@@ -115,6 +117,7 @@ class FakeWorld:
     """Everything a fake Resolve session holds, plus the call log and failure injection."""
 
     connection: Connection = "ok"
+    starting_answers: int = 2  # None answers from scriptapp before the app, for "starting"
     resolve: FakeResolve = field(init=False)
     calls: list[tuple[str, str, tuple[object, ...]]] = field(default_factory=list)
     fail: dict[str, object] = field(default_factory=dict)

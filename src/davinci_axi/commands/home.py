@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 
-from davinci_axi import __version__, registry
+from davinci_axi import registry, version
 from davinci_axi.errors import AxiError
 from davinci_axi.output import collapse_home, empty_state, hint
 from davinci_axi.session import Session
@@ -13,11 +13,8 @@ from davinci_axi.spec import CommandSpec, Invocation, Result
 DESCRIPTION = "Agent-ergonomic CLI for DaVinci Resolve Studio"
 MAX_TIMELINES = 10
 PENDING = ("Ready", "Ready for background render", "Ready to remotely render")
-NEXT_STEPS = (
-    ("projects", "list the projects in the current folder"),
-    ("timelines", "list the timelines of the current project"),
-    ("items", "list the items of the current timeline"),
-)
+MAX_STATE_HINTS = 4
+HELP_LINE = "Run `davinci-axi --help` to list commands and flags"
 
 
 def _live(session: Session) -> dict[str, object]:
@@ -62,30 +59,75 @@ def _live(session: Session) -> dict[str, object]:
     return data
 
 
-def _help(reachable: bool) -> list[str]:
+def _count(data: dict[str, object], key: str) -> int:
+    value = data.get(key)
+    return value if isinstance(value, int) else 0
+
+
+def _known(command: str) -> bool:
+    return command.split()[0] in registry.COMMANDS
+
+
+def next_steps(data: dict[str, object]) -> list[str]:
+    """Up to four hints computed from the live home data, each naming a registered command."""
+    steps: list[tuple[str, str]] = []
+    if not data.get("project"):
+        steps += [
+            ("projects", "list the projects in the current folder"),
+            ("project open <name>", "open one"),
+        ]
+    else:
+        if _count(data, "timeline_count") == 0:
+            steps += [
+                ("timelines", "list the timelines of the current project"),
+                ("timeline create <name> --force", "make the first timeline"),
+                ("media import <files> --force", "bring footage in"),
+            ]
+        current = data.get("timeline")
+        if isinstance(current, str) and current:
+            steps += [
+                ("items", f"list the items of {current}"),
+                ("timeline check --target <length>", "lint it before rendering"),
+            ]
+        pending = _count(data, "render_pending")
+        if pending > 0:
+            steps.append(("render start <job> --force", f"start the {pending} pending job(s)"))
+        if _count(data, "render_complete") > 0:
+            steps.append(("render verify --job <id> --max-mb <mb>", "measure a finished render"))
+    return [hint(cmd, purpose) for cmd, purpose in steps if _known(cmd)][:MAX_STATE_HINTS]
+
+
+def _help(
+    reachable: bool, starting: bool = False, data: dict[str, object] | None = None
+) -> list[str]:
+    if starting:
+        return [
+            "Wait a few seconds and run `davinci-axi` again; Resolve is still loading",
+            HELP_LINE,
+        ]
     if not reachable:
         return [
             "Fix the connection problem named in fix, then run `davinci-axi` again",
-            "Run `davinci-axi --help` to list commands and flags",
+            HELP_LINE,
         ]
-    steps = [hint(cmd, purpose) for cmd, purpose in NEXT_STEPS if cmd in registry.COMMANDS]
-    return [*steps[:2], "Run `davinci-axi --help` to list commands and flags"]
+    return [*next_steps(data or {}), HELP_LINE]
 
 
 def run(inv: Invocation) -> Result:
     data: dict[str, object] = {
         "bin": collapse_home(shutil.which(inv.bin_name) or inv.bin_name),
-        "version": __version__,
+        "version": version.describe(),
         "description": DESCRIPTION,
     }
     try:
         data.update(_live(inv.connect()))
     except AxiError as err:
-        data["resolve"] = "unreachable"
+        starting = err.code == "RESOLVE_STARTING"
+        data["resolve"] = "starting" if starting else "unreachable"
         data["code"] = err.code
         data["fix"] = err.help[0] if err.help else err.message
-        return Result(data, _help(False))
-    return Result(data, _help(True))
+        return Result(data, _help(False, starting))
+    return Result(data, _help(True, data=data))
 
 
 SPEC = CommandSpec(

@@ -14,15 +14,12 @@ from typing import Any
 
 from davinci_axi.commands import fusion
 from davinci_axi.commands.fusion_edit import (
-    ASSIGNMENTS,
-    AUTO_POS,
     ITEM_EXAMPLE,
     MUT_FLAGS,
     PORT_TARGET,
     SETTINGS_FILE,
     TOOL_METHODS,
     TOOL_NAME,
-    UNSETTABLE,
     Edit,
     comp_mutation,
     find_input,
@@ -36,7 +33,8 @@ from davinci_axi.commands.fusion_edit import (
     source_label,
     split_port,
 )
-from davinci_axi.commands.item_detail import str_arg
+from davinci_axi.commands.fusion_tool_add import ADD_SPEC
+from davinci_axi.commands.fusion_tool_set import SET_VERBS
 from davinci_axi.errors import AxiError, api_failed, not_found
 from davinci_axi.fusion_guard import (
     FUSION_FLAGS,
@@ -47,111 +45,14 @@ from davinci_axi.fusion_guard import (
     resolve_comp,
     tool_name,
     tool_row,
-    tools_of,
 )
 from davinci_axi.mutate import (
     Change,
     MutationPlan,
-    coerce_like,
-    parse_assignments,
     refuse_existing,
 )
 from davinci_axi.output import collapse_home
 from davinci_axi.spec import CommandSpec, Flag, Invocation, Positional, Result
-
-
-def _next_name(existing: list[str], reg_id: str) -> str:
-    number = 1
-    while f"{reg_id}{number}" in existing:
-        number += 1
-    return f"{reg_id}{number}"
-
-
-def run_add(inv: Invocation) -> Result:
-    reg_id = safe_lua("tool id", inv.positionals["id"])
-    name, after = str_arg(inv, "name"), str_arg(inv, "after")
-    pos_text = str_arg(inv, "pos")
-    if pos_text is not None and after is not None:
-        raise AxiError(
-            "VALIDATION_ERROR",
-            "--pos and --after contradict each other",
-            help=["--after lets Fusion place the tool next to it; pass one of them"],
-        )
-    x, y = parse_pos(pos_text) if pos_text is not None else (AUTO_POS, AUTO_POS)
-    edit = open_comp(inv)
-    comp = edit.ref.comp
-    existing = [tool_name(t) for t in tools_of(comp)]
-    if name is not None and name in existing:
-        raise AxiError(
-            "VALIDATION_ERROR",
-            f"a tool named {name} already exists",
-            help=[f"Tools in this comp: {', '.join(existing)}"],
-        )
-    anchor = find_tool(comp, after) if after is not None else None
-    predicted = name or _next_name(existing, reg_id)
-    words = ["fusion", "tool", "add", reg_id]
-    for flag, value in (("--name", name), ("--pos", pos_text), ("--after", after)):
-        words += [flag, value] if value is not None else []
-    created: dict[str, str] = {}
-
-    def body(plan: MutationPlan) -> None:
-        if anchor is not None:
-            fusion_call("SetActiveTool", comp.SetActiveTool, anchor)
-        tool = fusion_call("AddTool", comp.AddTool, reg_id, x, y)
-        if tool is None:
-            raise api_failed("AddTool", f"Fusion did not add a {reg_id} tool")
-        actual = tool_name(tool)
-        if name is not None and actual != name:
-            fusion_call("SetAttrs", tool.SetAttrs, {"TOOLS_Name": name})
-            actual = name
-        created["name"] = actual
-        plan.changes[:] = [Change("tool", None, actual)]
-        plan.next.insert(0, show_hint(inv, edit, actual))
-
-    def verify() -> dict[str, object]:
-        found = fusion_call("FindTool", comp.FindTool, created["name"])
-        return {"tool": created["name"] if found is not None else None}
-
-    return comp_mutation(
-        inv, edit, "fusion tool add", words, [Change("tool", None, predicted)], body, verify
-    )
-
-
-def run_set(inv: Invocation) -> Result:
-    assignments = parse_assignments(inv.positionals["assignments"])
-    edit = open_comp(inv)
-    label = inv.positionals["name"]
-    tool = find_tool(edit.ref.comp, label)
-    changes: list[Change] = []
-    wanted: dict[str, object] = {}
-    for key, text in assignments.items():
-        port = find_input(tool, label, key)
-        data_type = str(attrs_of(port).get("INPS_DataType") or "")
-        live = fusion_call("GetInput", tool.GetInput, key)
-        if data_type in UNSETTABLE or isinstance(live, (dict, list, tuple)):
-            raise AxiError(
-                "VALIDATION_ERROR",
-                f"input {key} ({data_type or 'table'}) cannot be set from a text value",
-                help=[
-                    "Use `fusion tool connect` for images; point and table inputs are unsupported"
-                ],
-            )
-        like = live if live is not None else (0.0 if data_type == "Number" else "")
-        value = coerce_like(text, like)
-        if value != live:
-            wanted[key] = value
-            changes.append(Change(key, live, value))
-    words = ["fusion", "tool", "set", label, inv.positionals["assignments"]]
-
-    def body(_: MutationPlan) -> None:
-        for key, value in wanted.items():
-            fusion_call("SetInput", tool.SetInput, key, value)
-
-    def verify() -> dict[str, object]:
-        return {key: fusion_call("GetInput", tool.GetInput, key) for key in wanted}
-
-    nxt = [show_hint(inv, edit, label)]
-    return comp_mutation(inv, edit, "fusion tool set", words, changes, body, verify, next_lines=nxt)
 
 
 def _input_ref(
@@ -190,7 +91,10 @@ def _rewire(
     def verify() -> dict[str, object]:
         return {field: source_label(find_input(tool, label, input_id))}
 
-    return comp_mutation(inv, edit, f"fusion tool {verb}", words, changes, body, verify)
+    extra: dict[str, object] = {"link": f"{after} -> {field}"} if after is not None else {}
+    return comp_mutation(
+        inv, edit, f"fusion tool {verb}", words, changes, body, verify, extra=extra
+    )
 
 
 def run_connect(inv: Invocation) -> Result:
@@ -217,7 +121,14 @@ def run_rename(inv: Invocation) -> Result:
     comp, old = edit.ref.comp, inv.positionals["name"]
     tool = find_tool(comp, old)
     if new != old and fusion_call("FindTool", comp.FindTool, new) is not None:
-        raise AxiError("VALIDATION_ERROR", f"a tool named {new} already exists")
+        raise AxiError(
+            "VALIDATION_ERROR",
+            f"a tool named {new} already exists",
+            help=[
+                "Pick another name with --to",
+                "List the tools with `davinci-axi fusion tools --item <ref>`",
+            ],
+        )
     changes = [Change("name", old, new)] if new != old else []
 
     def body(_: MutationPlan) -> None:
@@ -370,35 +281,11 @@ def run_load_settings(inv: Invocation) -> Result:
 
 
 TOOL_VERBS: dict[str, CommandSpec] = {
-    "add": mut_spec(
-        "add",
-        "Add a tool to the comp (Fusion places and wires it unless --pos is given)",
-        run_add,
-        positionals=(Positional("id", help="registry id, such as Blur or Merge"),),
-        flags=(
-            Flag("name", "str", None, help="name for the new tool"),
-            Flag("pos", "str", None, help="flow position x,y"),
-            Flag("after", "str", None, help="connect the new tool after this tool"),
-            *MUT_FLAGS,
-        ),
-        examples=(
-            f"davinci-axi fusion tool add Blur {ITEM_EXAMPLE}",
-            f"davinci-axi fusion tool add Blur {ITEM_EXAMPLE} --name Soft --force",
-        ),
-        methods=TOOL_METHODS,
-    ),
-    "set": mut_spec(
-        "set",
-        "Set tool inputs from <input>=<value> pairs and read them back",
-        run_set,
-        positionals=(TOOL_NAME, ASSIGNMENTS),
-        flags=MUT_FLAGS,
-        examples=(f"davinci-axi fusion tool set Blur1 XBlurSize=2 {ITEM_EXAMPLE} --force",),
-        methods=TOOL_METHODS,
-    ),
+    "add": ADD_SPEC,
+    **SET_VERBS,
     "connect": mut_spec(
         "connect",
-        "Connect a tool output to a tool input",
+        "Connect a tool output to a tool input (read back; VERIFY_FAILED if Fusion did not link)",
         run_connect,
         positionals=(Positional("source", help="<tool>[.<output>]"), PORT_TARGET),
         flags=MUT_FLAGS,

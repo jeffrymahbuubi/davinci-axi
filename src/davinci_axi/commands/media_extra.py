@@ -14,10 +14,10 @@ import os
 import shlex
 from collections.abc import Iterable
 from dataclasses import replace
-from typing import Any
 
 from davinci_axi.commands import media
 from davinci_axi.commands.item_detail import _properties as truncated_block
+from davinci_axi.commands.media_analyze import ANALYZE_SPEC
 from davinci_axi.commands.media_edit import CLIP, MARKER_SPEC, METADATA_SPEC
 from davinci_axi.commands.media_extra_common import ITEM, POOL, clip_plan, open_clip, pool_of
 from davinci_axi.commands.media_extra_io import (
@@ -36,6 +36,9 @@ from davinci_axi.commands.media_folders import (
     verb_spec,
     where_is,
 )
+from davinci_axi.commands.media_list import DEFAULT_FIELDS, EXTRA_FIELDS
+from davinci_axi.commands.media_property import PROPERTY_SPEC, _group
+from davinci_axi.commands.media_stills import MEDIA_STILLS_SPEC
 from davinci_axi.errors import AxiError, api_failed
 from davinci_axi.mutate import Change, MutationPlan, force_cmd, parse_assignments, run_mutation
 from davinci_axi.output import empty_state, hint
@@ -145,46 +148,6 @@ def run_third_party_set(inv: Invocation) -> Result:
     return run_mutation(inv, ctx.session, plan, apply, verify)
 
 
-def _lenient(expected: str, actual: Any) -> object:
-    """Resolve normalises numbers ("10" reads back "10.0"); treat equal numbers as equal."""
-    if str(actual) == expected:
-        return actual
-    try:
-        return expected if float(expected) == float(actual) else actual
-    except (TypeError, ValueError):
-        return actual
-
-
-def run_property_set(inv: Invocation) -> Result:
-    wanted = parse_assignments(inv.positionals["assignments"])
-    ctx, found, clip = open_clip(inv)
-    live = props(clip)
-    changed = {k: v for k, v in wanted.items() if str(live.get(k, "")) != v}
-    plan = clip_plan(
-        inv,
-        found,
-        "media property set",
-        [Change(k, live.get(k, ""), v) for k, v in changed.items()],
-        inv.positionals["assignments"],
-    )
-
-    def apply() -> None:
-        done: list[str] = []
-        for key, value in changed.items():
-            if not clip.SetClipProperty(key, value):
-                applied = ", ".join(done) or "none"
-                raise api_failed(
-                    "MediaPoolItem.SetClipProperty",
-                    f"could not set {key} (already applied: {applied})",
-                )
-            done.append(key)
-
-    def verify() -> dict[str, object]:
-        return {k: _lenient(v, clip.GetClipProperty(k)) for k, v in changed.items()}
-
-    return run_mutation(inv, ctx.session, plan, apply, verify)
-
-
 def run_replace(inv: Invocation) -> Result:
     given = inv.positionals["file"]
     path = abs_path(given)
@@ -289,13 +252,6 @@ def run_stereo_create(inv: Invocation) -> Result:
     return run_mutation(inv, ctx.session, plan, apply, verify)
 
 
-def _group(name: str, summary: str, **subcommands: CommandSpec) -> CommandSpec:
-    methods = tuple(dict.fromkeys(m for s in subcommands.values() for m in s.methods))
-    return CommandSpec(
-        name=name, summary=summary, subcommands=subcommands, reads_only=False, methods=methods
-    )
-
-
 REFRESH_SPEC = verb_spec(
     "refresh",
     "Refresh the media pool folders in collaboration mode (not read back; no snapshot)",
@@ -360,19 +316,6 @@ THIRD_PARTY_SPEC = _group(
     show=THIRD_PARTY_SHOW_SPEC,
     set=THIRD_PARTY_SET_SPEC,
 )
-PROPERTY_SET_SPEC = verb_spec(
-    "set",
-    "Set clip properties such as Alpha mode or Input LUT",
-    run_property_set,
-    (CLIP, Positional("assignments", help="comma-separated Property=value pairs")),
-    (),
-    (
-        "davinci-axi media property set A001_beach 'Alpha mode=Straight'",
-        "davinci-axi media property set A001_beach 'Alpha mode=Straight' --force",
-    ),
-    (ITEM + "GetClipProperty", ITEM + "SetClipProperty"),
-)
-PROPERTY_SPEC = _group("property", "Set clip properties", set=PROPERTY_SET_SPEC)
 REPLACE_SPEC = verb_spec(
     "replace",
     "Replace the file behind a clip (keeps its place in timelines)",
@@ -441,6 +384,8 @@ FOLDER_EXT_SPEC = replace(
     methods=tuple(dict.fromkeys((*FOLDER_IMPORT_SPEC.methods, *FOLDER_EXPORT_SPEC.methods))),
 )
 _EXTRA: dict[str, CommandSpec] = {
+    "stills": MEDIA_STILLS_SPEC,
+    "analyze": ANALYZE_SPEC,
     "refresh": REFRESH_SPEC,
     "selection": SELECTION_SPEC,
     "metadata": METADATA_EXT_SPEC,
@@ -465,10 +410,17 @@ def _methods(specs: Iterable[CommandSpec]) -> Iterable[str]:
 SPEC = replace(
     media.SPEC,
     subcommands={**media.SPEC.subcommands, **_EXTRA},
+    notes=(
+        *media.SPEC.notes,
+        f"--fields also takes {', '.join(EXTRA_FIELDS)}; "
+        f"the default is {', '.join(DEFAULT_FIELDS)}",
+    ),
     examples=(
         *media.SPEC.examples,
         "davinci-axi media selection show",
         "davinci-axi media replace A001_beach ~/new.mov --force",
+        "davinci-axi media analyze --folder Master --out ~/edit/analysis.json",
+        "davinci-axi media property set --used 'Super Scale=1' --save-restore ~/ss.json --force",
     ),
     methods=tuple(dict.fromkeys((*media.SPEC.methods, *_methods(_EXTRA.values())))),
 )

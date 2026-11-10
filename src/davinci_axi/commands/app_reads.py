@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, cast
 
-from davinci_axi import registry
+from davinci_axi import extras, registry
 from davinci_axi.commands.color_common import GalleryApi
 from davinci_axi.output import hint
 from davinci_axi.resolve_types import ResolveApp
@@ -40,6 +40,7 @@ def run_show(inv: Invocation) -> Result:
         "version": resolve.GetVersionString(),
         "product": session.product,
         "edition": "Studio" if session.is_studio else "Free",
+        "ai_extras": extras.scan().summary(),
         "page": resolve.GetCurrentPage(),
         "project": project.GetName() if project is not None else None,
         "timeline": timeline.GetName() if timeline is not None else None,
@@ -50,6 +51,7 @@ def run_show(inv: Invocation) -> Result:
     if "page" in registry.COMMANDS:
         lines.append(hint("page show", "see which pages exist and which one is open"))
     lines.append(hint("timelines", "list the timelines of the current project"))
+    lines.append(hint("ai extras", "list the installed AI packages"))
     return Result(data, lines)
 
 

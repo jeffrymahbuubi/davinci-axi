@@ -21,6 +21,7 @@ from davinci_axi.mutate import (
     check_snapshot_flags,
     coerce_like,
     force_cmd,
+    keep_page,
     parse_assignments,
     refuse_existing,
     run_mutation,
@@ -388,6 +389,19 @@ def test_with_page_failure_is_api_failed(fake_world: FakeWorld) -> None:
     with pytest.raises(AxiError) as caught, with_page(session, "color"):
         pytest.fail("must not enter")
     assert caught.value.code == "API_FAILED"
+
+
+def test_keep_page_skips_open_page_when_the_page_reads_empty(fake_world: FakeWorld) -> None:
+    session = connect_module.connect(GlobalOpts())
+    with keep_page(session) as state:
+        fake_world.inject("Resolve.GetCurrentPage", "")
+    assert state == {"page_restored": False, "page_before": "edit"}
+    fake_world.resolve.page = "deliver"
+    fake_world.inject("Resolve.GetCurrentPage", "deliver")
+    with keep_page(session) as state:
+        fake_world.inject("Resolve.GetCurrentPage", "")
+    assert state == {"page_restored": False}
+    assert fake_world.page_changes() == []
 
 
 def test_with_current_timeline_switches_and_restores(fake_world: FakeWorld) -> None:

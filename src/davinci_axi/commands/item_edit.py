@@ -7,6 +7,7 @@ subcommand. Every verb is a dry run until `--force` and goes through `mutate.run
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import replace
 from typing import Any, cast
 
@@ -39,7 +40,8 @@ from davinci_axi.resolve_types_edit import TimelineEdit
 from davinci_axi.spec import CommandSpec, Flag, Invocation, Positional, Result
 
 ASSIGNMENTS = Positional(
-    "assignments", help="comma-separated Property=value pairs, e.g. Opacity=50"
+    "assignments",
+    help="comma-separated Property=value pairs, e.g. Opacity=50 or ZoomX=1.25,Tilt=-200",
 )
 
 
@@ -243,6 +245,25 @@ def run_flag_clear(inv: Invocation) -> Result:
     )
 
 
+def title_compound_name(item: Any) -> str | None:
+    """The `title: ` compound clip behind a timeline item, or None for any other item."""
+    try:
+        media = item.GetMediaPoolItem()
+        if media is None or media.GetClipProperty("Type") != "Compound":
+            return None
+        name = media.GetName()
+    except AxiError:
+        return None
+    return name if isinstance(name, str) and name.startswith("title: ") else None
+
+
+def title_hint(name: str) -> str:
+    return hint(
+        f"media delete {shlex.quote(name)} --force",
+        "remove the title's compound clip from the pool too",
+    )
+
+
 def run_delete(inv: Invocation) -> Result:
     ripple = bool(inv.args.get("ripple"))
     target = open_target(inv)
@@ -261,6 +282,8 @@ def run_delete(inv: Invocation) -> Result:
         + "; the snapshot is the only way back"
     )
     plan.next = [hint("items", "list the remaining items")]
+    if compound := title_compound_name(target.item):
+        plan.next.append(title_hint(compound))
 
     def apply() -> None:
         if not cast(TimelineEdit, timeline).DeleteClips([target.item], ripple):
@@ -344,6 +367,18 @@ SET_SPEC = CommandSpec(
         "davinci-axi item set V1:2 Opacity=50",
         "davinci-axi item set V1:2 Opacity=50,ZoomX=1.2 --force",
         "davinci-axi item set V1:2 Pan=10 --timeline 'Edit v2' --force",
+        "davinci-axi item set V1:2 ZoomX=1.25,ZoomY=1.25,Tilt=-200 --force",
+    ),
+    notes=(
+        "Pan/Tilt are in output pixels: Pan + moves the image right, Tilt + moves it UP "
+        "(measured live on 21.1.1); Resolve accepts -4*width..4*width and -4*height..4*height",
+        "ZoomX/ZoomY are factors (1 = 100%, range 0..100); with zoom z the largest shift without "
+        "black edges is (z-1)*W/2 horizontally and (z-1)*H/2 vertically, e.g. "
+        "ZoomX=ZoomY=1.25 on 1080x1920 allows Pan +-135, Tilt +-240",
+        "Crops are in pixels; to hide an intrusion at the bottom edge zoom slightly and use a "
+        "negative Tilt",
+        "Stabilization has no property in the API, so `item` cannot show it; `ai stabilize` is "
+        "synchronous and is verified with a still (`render frame`)",
     ),
     reads_only=False,
     methods=(
@@ -386,6 +421,15 @@ DISABLE_SPEC = CommandSpec(
     reads_only=False,
     methods=("TimelineItem.GetClipEnabled", "TimelineItem.SetClipEnabled"),
 )
+TITLE_METHODS = (
+    "TimelineItem.GetMediaPoolItem",
+    "MediaPoolItem.GetClipProperty",
+    "MediaPoolItem.GetName",
+)
+TITLE_NOTE = (
+    "Deleting a title item leaves its compound clip in the pool; the help names the `media delete`"
+    " command when the item is a title"
+)
 DELETE_SPEC = CommandSpec(
     name="delete",
     summary="Delete an item from its timeline (irreversible except through a snapshot)",
@@ -394,7 +438,8 @@ DELETE_SPEC = CommandSpec(
     flags=(*ITEM_FLAGS, Flag("ripple", "bool", False, help="close the gap left by the item")),
     examples=("davinci-axi item delete V1:2", "davinci-axi item delete V1:2 --ripple --force"),
     reads_only=False,
-    methods=("Timeline.DeleteClips", "Timeline.GetItemListInTrack"),
+    methods=("Timeline.DeleteClips", "Timeline.GetItemListInTrack", *TITLE_METHODS),
+    notes=(TITLE_NOTE,),
 )
 
 SUBCOMMANDS: dict[str, CommandSpec] = {

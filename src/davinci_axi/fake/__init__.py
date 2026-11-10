@@ -92,7 +92,10 @@ def scriptapp(name: str) -> object | None:
     if world.connection == "hang":
         world.hang_gate.wait(HANG_SECONDS)
         return None
-    if world.connection == "ok" and name == "Resolve":
+    if world.connection == "starting" and world.starting_answers > 0:
+        world.starting_answers -= 1
+        return None
+    if world.connection in ("ok", "starting") and name == "Resolve":
         return world.resolve
     return None
 
@@ -115,14 +118,37 @@ def default_world() -> FakeWorld:
 def _fill_media(project: FakeProject) -> None:
     root = project.media_pool.root
     footage = root.add_folder("Footage")
-    footage.add_clip("A001_beach", "/media/davinci-axi-test/A001_beach.mov", duration="00:00:05:00")
-    footage.add_clip("A002_city", "/media/davinci-axi-test/A002_city.mov", duration="00:00:08:00")
-    footage.add_clip("A003_dusk", "/media/davinci-axi-test/A003_dusk.mov", duration="00:00:06:00")
+    footage.add_clip(
+        "A001_beach",
+        "/media/davinci-axi-test/A001_beach.mov",
+        duration="00:00:05:00",
+        frames="120",
+        date_created="Mon Nov 3 2025 09:00:00",
+    )
+    footage.add_clip(
+        "A002_city",
+        "/media/davinci-axi-test/A002_city.mov",
+        duration="00:00:08:00",
+        frames="192",
+        date_created="Sat Nov 1 2025 09:00:00",
+        resolution="1080x1920",
+    )
+    footage.add_clip(
+        "A003_dusk",
+        "/media/davinci-axi-test/A003_dusk.mov",
+        duration="00:00:06:00",
+        frames="144",
+        date_created="Sun Nov 2 2025 09:00:00",
+    )
     root.add_clip(
         "music_bed",
         "/media/davinci-axi-test/music_bed.wav",
         clip_type="Audio",
         duration="00:01:00:00",
+        frames="1440",
+        video_codec="",
+        resolution="",
+        date_created="Tue Nov 4 2025 09:00:00",
     )
     root.clips[0].markers[24] = {
         "color": "Green",

@@ -12,7 +12,8 @@ from davinci_axi import registry
 from davinci_axi.commands import item_detail
 from davinci_axi.commands.item_detail import TRACK_TYPES, Located, str_arg, walk_items
 from davinci_axi.errors import AxiError
-from davinci_axi.output import apply_limit, empty_state, hint, select_fields
+from davinci_axi.output import apply_limit, empty_state, hint, page_meta, select_fields
+from davinci_axi.resolve_types import MediaPoolItemApi, TimelineItemApi
 from davinci_axi.spec import (
     DEFAULT_LIMIT,
     LIST_FLAGS,
@@ -24,7 +25,27 @@ from davinci_axi.spec import (
 )
 
 DEFAULT_FIELDS = ("id", "name", "track", "start", "duration")
-EXTRA_FIELDS = ("end", "type", "enabled", "color", "source_in", "source_out", "media")
+EXTRA_FIELDS = (
+    "end",
+    "type",
+    "enabled",
+    "color",
+    "source_in",
+    "source_out",
+    "media",
+    "fade_in",
+    "fade_out",
+    "volume",
+    "zoom",
+    "pan",
+    "tilt",
+    "fps",
+    "resolution",
+    "super_scale",
+)
+FADE_FIELDS = {"fade_in", "fade_out"}
+PROPERTY_FIELDS = {"volume": "AudioVolume", "zoom": "ZoomX", "pan": "Pan", "tilt": "Tilt"}
+CLIP_FIELDS = {"fps": "FPS", "resolution": "Resolution", "super_scale": "Super Scale"}
 
 TIMELINE_FLAG = Flag("timeline", "str", None, help="timeline name (default: the current timeline)")
 
@@ -32,6 +53,52 @@ TIMELINE_FLAG = Flag("timeline", "str", None, help="timeline name (default: the 
 def _int_arg(inv: Invocation, key: str, default: int | None) -> int | None:
     value = inv.args.get(key, default)
     return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
+def _fades(item: TimelineItemApi) -> dict[str, object]:
+    """`GetFades()`, or `{}` where the API is missing (before Resolve 21.1) or returns nothing."""
+    try:
+        return dict(item.GetFades() or {})
+    except AttributeError:
+        return {}
+
+
+def _fade(fades: dict[str, object], *keys: str) -> object:
+    for key in keys:
+        if key in fades:
+            return fades[key]
+    return None
+
+
+def _clip_value(media: MediaPoolItemApi | None, name: str) -> object:
+    """One clip property, `None` with no media or an empty value; `fps` as a float when numeric."""
+    value = media.GetClipProperty(name) if media is not None else None
+    if value is None or value == "":
+        return None
+    if name == "FPS":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _audit_fields(item: TimelineItemApi, extras: set[str]) -> dict[str, object]:
+    """The audit fields in `extras`; each Resolve read happens once, and only when requested."""
+    row: dict[str, object] = {}
+    if extras & FADE_FIELDS:
+        fades = _fades(item)
+        row["fade_in"] = _fade(fades, "FadeIn", "fadeInLength")
+        row["fade_out"] = _fade(fades, "FadeOut", "fadeOutLength")
+    if extras & PROPERTY_FIELDS.keys():
+        props = item.GetProperties() or {}
+        for field, key in PROPERTY_FIELDS.items():
+            row[field] = props.get(key)
+    if extras & CLIP_FIELDS.keys():
+        media = item.GetMediaPoolItem()
+        for field, key in CLIP_FIELDS.items():
+            row[field] = _clip_value(media, key)
+    return row
 
 
 def _row(located: Located, extras: set[str]) -> dict[str, object]:
@@ -59,6 +126,7 @@ def _row(located: Located, extras: set[str]) -> dict[str, object]:
     if "media" in extras:
         media = item.GetMediaPoolItem()
         row["media"] = media.GetName() if media is not None else None
+    row.update(_audit_fields(item, extras))
     return row
 
 
@@ -126,7 +194,7 @@ def run(inv: Invocation) -> Result:
     types = (track_type,) if track_type else TRACK_TYPES
     found = list(walk_items(timeline, types, track))
     shown, total = apply_limit(found, limit)
-    data: dict[str, object] = {"timeline": timeline_name, "total": total}
+    data: dict[str, object] = {"timeline": timeline_name, **page_meta(len(shown), total)}
     if shown:
         rows = [_row(located, extras) for located in shown]
         data["items"] = select_fields(rows, DEFAULT_FIELDS, requested)
@@ -158,10 +226,12 @@ ITEM_LIST_METHODS = (
     "TimelineItem.GetClipEnabled",
     "TimelineItem.GetMediaPoolItem",
     "MediaPoolItem.GetName",
+    "TimelineItem.GetFades",
+    "TimelineItem.GetProperties",
+    "MediaPoolItem.GetClipProperty",
 )
 ITEM_DETAIL_METHODS = (
     *ITEM_LIST_METHODS,
-    "TimelineItem.GetProperties",
     "TimelineItem.GetFlagList",
     "TimelineItem.GetMarkers",
     "TimelineItem.GetFusionCompNameList",
@@ -170,7 +240,6 @@ ITEM_DETAIL_METHODS = (
     "TimelineItem.GetTakesCount",
     "TimelineItem.GetTakeByIndex",
     "TimelineItem.GetSelectedTakeIndex",
-    "MediaPoolItem.GetClipProperty",
     "TimelineItem.GetLeftOffset",
     "TimelineItem.GetRightOffset",
     "TimelineItem.GetSourceStartTime",
@@ -197,6 +266,13 @@ SPEC = CommandSpec(
         "davinci-axi items",
         "davinci-axi items --timeline 'Edit v2' --track-type audio",
         "davinci-axi items --track-type video --track 1 --fields name,start,end,media",
+        "davinci-axi items --track-type audio --fields name,volume,fade_in,fade_out",
+    ),
+    notes=(
+        "audit fields (read only when requested): fade_in, fade_out, volume, zoom, pan, tilt, "
+        "fps, resolution, super_scale",
+        "fades need Resolve 21.1+; volume is null on video items; clip fields are null "
+        "with no media",
     ),
     methods=ITEM_LIST_METHODS,
 )

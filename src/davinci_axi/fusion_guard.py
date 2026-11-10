@@ -416,3 +416,12 @@ def comp_snapshot_hint(path: Path) -> str:
         f"Re-import with `fusion comp import {shlex.quote(collapse_home(path))} "
         "--item <id> --force`"
     )
+
+
+def source_label(port: Any) -> str | None:
+    """`Tool.Output` feeding `port`, or None when it is unconnected."""
+    source = fusion_call("GetConnectedOutput", port.GetConnectedOutput)
+    if source is None:
+        return None
+    owner = fusion_call("GetTool", source.GetTool)
+    return f"{tool_name(owner)}.{attrs_of(source).get('OUTS_ID')}"

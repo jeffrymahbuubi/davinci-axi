@@ -13,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
+from davinci_axi.commands.ai_preflight import IGNORE_FLAG, ai_mutation
 from davinci_axi.commands.audio_common import (
     FOLDER_FLAG,
     MEDIA_READS,
@@ -129,7 +130,7 @@ def _classify(inv: Invocation, clear: bool, method: str, warning: str) -> Result
         if not done["ok"]:
             raise not_available(method)
 
-    return run_mutation(inv, scope.ctx.session, plan, apply, lambda: {"called": done["ok"]})
+    return ai_mutation(inv, scope.ctx.session, plan, apply, lambda: {"called": done["ok"]})
 
 
 def run_classify(inv: Invocation) -> Result:
@@ -186,7 +187,7 @@ def run_speech(inv: Invocation) -> Result:
         command="audio speech",
         target=f"project {project.GetName()}",
         changes=[Change("clip", None, "(new clip)")],
-        force_cmd=force_words(inv, words),
+        force_cmd=force_words(inv, words, ("ignore-preflight",)),
         warning="needs the Speech Generator (Studio with AI Extras); adds a clip to the media pool",
     )
     created: dict[str, str] = {}
@@ -203,7 +204,7 @@ def run_speech(inv: Invocation) -> Result:
     def verify() -> dict[str, object]:
         return {"clip": created["name"] if where_is(ctx, created["uid"]) else None}
 
-    return run_mutation(inv, ctx.session, plan, apply, verify)
+    return ai_mutation(inv, ctx.session, plan, apply, verify, package="AI Speech Generator")
 
 
 # ---- specs ----------------------------------------------------------------------------------
@@ -260,7 +261,7 @@ CLASSIFY_SPEC = replace(
 )
 SPEECH_SPEC = verb(
     "speech",
-    "Generate speech from text into a new media pool clip (needs AI Extras)",
+    "Generate speech from text into a new media pool clip (needs AI Speech Generator)",
     run_speech,
     positionals=(Positional("text", help="text to speak (up to 350 characters)"),),
     flags=(
@@ -269,6 +270,7 @@ SPEECH_SPEC = verb(
         Flag("speed", "float", None, help="-10 to 10"),
         Flag("variation", "float", None, help="0 to 1"),
         Flag("pitch", "float", None, help="-2 to 2"),
+        IGNORE_FLAG,
     ),
     examples=(
         "davinci-axi audio speech 'Welcome to the show' --voice 'Female 1'",

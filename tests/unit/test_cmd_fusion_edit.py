@@ -107,7 +107,7 @@ def test_tool_add_force_runs_the_whole_flow_in_order(
     assert data["resolvepython_processes"] == 0
 
 
-def test_tool_add_auto_places_before_media_out_and_name_and_pos_are_honoured(
+def test_tool_add_wires_nothing_and_name_and_pos_are_honoured(
     run_cli: Run, fake_world: FakeWorld
 ) -> None:
     run_cli(["fusion", "tool", "add", "Blur", *ITEM, "--name", "Soft", "--force"])
@@ -117,7 +117,7 @@ def test_tool_add_auto_places_before_media_out_and_name_and_pos_are_honoured(
     assert comp.flow_view.positions["Blur1"] == (4.0, 2.0)
     _, out, _ = run_cli(["fusion", "graph", *ITEM, "--json"])
     edges = {(e["from"], e["to"]) for e in json.loads(out)["edges"]}
-    assert edges == {("MediaIn1", "Soft"), ("Soft", "MediaOut1")}
+    assert edges == {("MediaIn1", "MediaOut1")}
 
 
 def test_tool_add_after_connects_to_the_named_tool_and_second_add_gets_the_next_name(

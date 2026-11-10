@@ -40,7 +40,14 @@ def run_keyframe(inv: Invocation) -> Result:
     tool = find_tool(comp, tool_label)
     port = find_input(tool, tool_label, input_id)
     if str(attrs_of(port).get("INPS_DataType")) in UNSETTABLE:
-        raise AxiError("VALIDATION_ERROR", f"input {input_id} cannot be animated")
+        raise AxiError(
+            "VALIDATION_ERROR",
+            f"input {input_id} cannot be animated",
+            help=[
+                "Animate a number, point or color input",
+                "Check the input id with `davinci-axi fusion tool show <name>`",
+            ],
+        )
     ordered = sorted(keys.items())
     changes = [
         Change(f"{input_id}@{t:g}", fusion_call("GetInput", tool.GetInput, input_id, t), v)
@@ -100,7 +107,11 @@ def run_undo(inv: Invocation) -> Result:
     count = inv.args.get("count")
     count = count if isinstance(count, int) and not isinstance(count, bool) else 1
     if count < 1:
-        raise AxiError("VALIDATION_ERROR", "--count needs a number of 1 or more")
+        raise AxiError(
+            "VALIDATION_ERROR",
+            "--count needs a number of 1 or more",
+            help=["Valid example: --count 2"],
+        )
     edit = open_comp(inv)
     comp = edit.ref.comp
     names = undo_names(comp)

@@ -42,6 +42,7 @@ PRESETS = {
     "netflix": "AUTO_CAPTION_NETFLIX",
 }
 LINE_BREAKS = {"single": "AUTO_CAPTION_LINE_SINGLE", "double": "AUTO_CAPTION_LINE_DOUBLE"}
+LANGUAGE_PACK = "Extended AI Transcription Language Support 2"
 CHARS_RANGE = (1, 60)
 GAP_RANGE = (0, 10)
 TIMELINE_READS = methods_of(
@@ -78,7 +79,7 @@ def run_scene_cuts(inv: Invocation) -> Result:
         target=f"timeline {timeline.GetName()}",
         changes=[],
         force_cmd=force_words(inv, ["ai", "scene-cuts"]),
-        warning="adds cuts and markers along the current timeline; needs AI Extras",
+        warning="adds cuts and markers along the current timeline; needs Studio",
         next=[hint("timelines", "list the timelines"), hint("ai status", "check the job")],
     )
     markers_before = len(timeline.GetMarkers() or {})
@@ -147,7 +148,10 @@ def run_subtitles(inv: Invocation) -> Result:
         changes=[],
         force_cmd=force_words(inv, words),
         extra={"settings": ", ".join(shown) or "(defaults)"},
-        warning="adds a subtitle track to the timeline from its audio; needs AI Extras",
+        warning=(
+            "adds a subtitle track to the timeline from its audio; needs Studio; non-built-in "
+            f"languages need the Extras package {LANGUAGE_PACK}"
+        ),
         next=[hint("ai status", "check the job")],
     )
     tracks_before = timeline.GetTrackCount("subtitle")
@@ -170,6 +174,8 @@ def run_subtitles(inv: Invocation) -> Result:
         start,
         scope=lambda: timeline_scope(session, timeline, plan),
         after=after,
+        package=LANGUAGE_PACK,
+        advisory=True,
     )
 
 

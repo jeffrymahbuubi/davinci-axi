@@ -19,7 +19,9 @@ from davinci_axi.fake.ext_fusion import (
     FakeInput,
     FakeOutput,
     FakeTool,
+    comp_of,
 )
+from davinci_axi.fake.insert_place import place_insert
 from davinci_axi.fake.timeline import FakeTimeline, FakeTimelineItem
 
 AUTO_POS = -32768.0
@@ -27,6 +29,19 @@ SETTINGS_PLACEHOLDER = "fake fusion settings: "
 _KEY = "_axi_fusion_edit"
 _SPLINE = re.compile(r'FindTool\("(\w+)"\):SetInput\("(\w+)", BezierSpline\{\}\)')
 T = TypeVar("T")
+
+# Text+ inputs; the ids are ASSUMED from Text+ .setting files (check: `fusion tool show` live)
+_TEXTPLUS_INPUTS: tuple[tuple[str, str, Any], ...] = (
+    ("StyledText", "Text", "Text"),
+    ("Size", "Number", 0.08),
+    ("Font", "Text", "Open Sans"),
+    ("Style", "Text", "Regular"),
+    ("Red1", "Number", 1.0),
+    ("Green1", "Number", 1.0),
+    ("Blue1", "Number", 1.0),
+    ("Alpha1", "Number", 1.0),
+    ("Center", "Point", {1: 0.5, 2: 0.5}),
+)
 
 # regId -> inputs (id, type, default) and output ids
 _TEMPLATES: dict[str, tuple[tuple[tuple[str, str, Any], ...], tuple[str, ...]]] = {
@@ -52,8 +67,37 @@ _TEMPLATES: dict[str, tuple[tuple[tuple[str, str, Any], ...], tuple[str, ...]]] 
         ),
         ("Output",),
     ),
-    "TextPlus": ((("StyledText", "Text", "Text"),), ("Output",)),
+    "TextPlus": (_TEXTPLUS_INPUTS, ("Output",)),
+    "EllipseMask": (
+        (
+            ("Center", "Point", {1: 0.5, 2: 0.5}),
+            ("Width", "Number", 0.5),
+            ("Height", "Number", 0.5),
+        ),
+        ("Mask",),
+    ),
+    "RectangleMask": (
+        (
+            ("Center", "Point", {1: 0.5, 2: 0.5}),
+            ("Width", "Number", 0.5),
+            ("Height", "Number", 0.5),
+        ),
+        ("Mask",),
+    ),
+    "ObjectRemoval": (
+        (
+            ("Input", "Image", None),
+            ("Mask", "Mask", None),
+            ("SceneAnalysis", "Number", 0.0),
+            ("BuildCleanPlate", "Number", 0.0),
+            ("Strength", "Number", 1.0),
+        ),
+        ("Output",),
+    ),
 }
+_OUTPUT_TYPES = {"EllipseMask": "Mask", "RectangleMask": "Mask"}
+# Fusion names some tools by a shorter prefix than their registry id (mirrors the command).
+_PRINTED_PREFIX = {"RectangleMask": "Rectangle"}
 
 
 @dataclass
@@ -99,26 +143,11 @@ def _find_input(tool: FakeTool, input_id: str) -> FakeInput | None:
 
 def _unique_name(comp: FakeComp, reg_id: str) -> str:
     taken = {t.name for t in comp.tools}
+    prefix = _PRINTED_PREFIX.get(reg_id, reg_id)
     number = 1
-    while f"{reg_id}{number}" in taken:
+    while f"{prefix}{number}" in taken:
         number += 1
-    return f"{reg_id}{number}"
-
-
-def _auto_connect(comp: FakeComp, tool: FakeTool) -> None:
-    """Fusion auto-placement: wire the new tool after the active tool, or before MediaOut."""
-    main = next((i for i in tool.inputs if i.data_type == "Image"), None)
-    media_out = next((t for t in comp.tools if t.reg_id == "MediaOut"), None)
-    out_in = _find_input(media_out, "Input") if media_out is not None else None
-    active = edit_state(comp).active_tool
-    if active is not None and active.outputs:
-        if main is not None:
-            main.connected = active.outputs[0]
-        return
-    if main is not None and out_in is not None:
-        main.connected = out_in.connected
-    if out_in is not None and tool.outputs:
-        out_in.connected = tool.outputs[0]
+    return f"{prefix}{number}"
 
 
 def _add_tool(
@@ -136,9 +165,7 @@ def _add_tool(
     for input_id, data_type, default in template[0]:
         tool.add_input(input_id, data_type, default)
     for output_id in template[1]:
-        tool.add_output(output_id)
-    if auto:
-        _auto_connect(self, tool)
+        tool.add_output(output_id, _OUTPUT_TYPES.get(regId, "Image"))
     self.push_undo(f"Add Tool {tool.name}")
     return tool
 
@@ -206,7 +233,8 @@ def _connect_input(self: FakeTool, inputId: str, source: Any) -> bool:
     else:
         return False
     self.comp.push_undo(f"Connect {self.name}.{inputId}")
-    return True
+    # `connect_returns_false` mimics live Fusion: the link is made but False comes back (F33)
+    return not self.comp.__dict__.get("connect_returns_false", False)
 
 
 def _delete(self: FakeTool) -> None:
@@ -277,11 +305,6 @@ def _set_pos(self: FakeFlowView, tool: FakeTool, x: float, y: float) -> None:
     tool.comp.push_undo(f"Move {tool.name}")
 
 
-def _first_video(timeline: FakeTimeline) -> Any:
-    tracks = timeline.tracks["video"]
-    return tracks[0] if tracks and not tracks[0].locked else None
-
-
 def _create_fusion_clip(self: FakeTimeline, timelineItems: list[FakeTimelineItem]) -> Any:
     injected, value = self._rec("CreateFusionClip", timelineItems)
     if injected:
@@ -301,12 +324,9 @@ def _create_fusion_clip(self: FakeTimeline, timelineItems: list[FakeTimelineItem
 
 
 def _insert(self: FakeTimeline, name: str, kind: str) -> FakeTimelineItem | None:
-    track = _first_video(self)
-    if track is None:
-        return None
-    start = max((i.start + i.duration for i in track.items), default=self.start_frame)
-    item = self.add_item("video", 1, name, start, 48, kind=kind)
-    item.comps.append("Composition 1")
+    item = place_insert(self, name, kind)
+    if item is not None:
+        item.comps.append("Composition 1")
     return item
 
 
@@ -328,7 +348,13 @@ def _insert_title(self: FakeTimeline, titleName: str) -> FakeTimelineItem | None
     injected, value = self._rec("InsertFusionTitleIntoTimeline", titleName)
     if injected:
         return value if isinstance(value, FakeTimelineItem) else None
-    return _insert(self, titleName, "Title")
+    item = _insert(self, titleName, "Title")
+    if item is not None:  # live a Text+ title's comp holds a `Template` tool holding the text
+        template = comp_of(item).add_tool_object("Template", "TextPlus", (1.0, 0.0))
+        for row in _TEXTPLUS_INPUTS:
+            template.add_input(*row)
+        template.add_output("Output", "Image")
+    return item
 
 
 _METHODS: dict[tuple[type[Any], str], Callable[..., Any]] = {

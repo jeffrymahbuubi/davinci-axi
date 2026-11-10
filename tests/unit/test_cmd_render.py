@@ -8,9 +8,10 @@ from pathlib import Path
 import pytest
 
 from davinci_axi import registry
-from davinci_axi.commands import render, render_common
+from davinci_axi.commands import render, render_common, render_frame
 from davinci_axi.fake import FakeWorld, ext_render
 from davinci_axi.fake.core import FakeProject
+from davinci_axi.fake.timeline import FakeTimeline
 from davinci_axi.spec import CommandSpec
 
 Run = Callable[[list[str]], tuple[int, str, str]]
@@ -147,8 +148,11 @@ def test_status_missing_job_status_becomes_unknown(run_cli: Run, fake_world: Fak
 def test_bare_render_exits_2_listing_subcommands(run_cli: Run, fake_world: FakeWorld) -> None:
     code, out, _ = run_cli(["render"])
     assert code == 2
-    names = "presets, status, formats, add, start, stop, delete, quick-export, frame, format, mode"
-    assert f"Valid subcommands for `render`: {names}, preset" in out
+    names = (
+        "presets, status, formats, add, start, stop, delete, deliver, verify, master, sheet, "
+        "quick-export, frame, format, mode"
+    )
+    assert f"Valid subcommands for `render`: {names}, settings, preset" in out
     assert fake_world.calls == []
 
 
@@ -235,13 +239,27 @@ def test_formats_lists_formats_codecs_and_resolutions_without_writing(
     assert "formats[2]{name,extension}:" in out and "  QuickTime,mov" in out
     code, out, _ = run_cli(["render", "formats", "--codecs", "mov", "--resolutions"])
     keys = parse_toon_keys(out)
-    assert code == 0 and keys["codecs_for"] == "mov"
+    assert code == 0 and keys["extension"] == "mov" and keys["format"] == "QuickTime"
+    assert "formats" not in keys
     assert "codecs[2]{name,codec}:" in out and "  ProRes 422 HQ,ProRes422HQ" in out
     assert "resolutions[1]{width,height}:" in out and "  1920,1080" in out
     assert fake_world.calls_to("Project.GetRenderResolutions") == [("mov", None)]
     code, out, _ = run_cli(["render", "formats", "--audio", "--codecs", "wav"])
-    assert code == 0 and "  Wave,wav" in out and "  Linear PCM,LinearPCM" in out
+    assert code == 0 and "  Linear PCM,LinearPCM" in out and "formats" not in out
+    assert "extension: wav" in out
     assert fake_world.write_calls() == []
+
+
+def test_formats_codecs_prints_only_the_codec_block(
+    run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld
+) -> None:
+    code, out, _ = run_cli(["render", "formats", "--codecs", "mp4"])
+    keys = parse_toon_keys(out)
+    assert code == 0 and "formats" not in keys
+    assert (keys["format"], keys["extension"]) == ("MP4", "mp4")
+    assert "codecs[2]{name,codec}:" in out and "  H.265,H265" in out
+    _, out, _ = run_cli(["render", "formats", "--resolutions"])
+    assert "formats[2]{name,extension}:" in out
 
 
 def test_formats_unknown_extension_is_not_found(run_cli: Run, fake_world: FakeWorld) -> None:
@@ -324,6 +342,88 @@ def test_frame_failure_still_restores_the_page(
     code, out, _ = run_cli(["render", "frame", str(tmp_path / "f.png")])
     assert code == 1 and "API_FAILED" in out
     assert fake_world.resolve.GetCurrentPage() == "edit"
+
+
+def _current(world: FakeWorld) -> FakeTimeline:
+    timeline = _project(world).current_timeline
+    assert timeline is not None
+    return timeline
+
+
+def test_frame_tc_moves_the_playhead_then_exports(
+    run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld, tmp_path: Path
+) -> None:
+    target = tmp_path / "f.png"
+    code, out, _ = run_cli(["render", "frame", str(target), "--tc", "01:00:02:00"])
+    keys = parse_toon_keys(out)
+    assert code == 0 and keys["playhead_moved"] == "true"
+    assert keys["timecode"] == '"01:00:02:00"'
+    assert fake_world.calls_to("Timeline.SetCurrentTimecode") == [("01:00:02:00",)]
+    assert _current(fake_world).current_tc == "01:00:02:00"
+    assert target.exists()
+    assert fake_world.calls_to("Project.ExportCurrentFrameAsStill") != []
+
+
+def test_frame_tc_at_the_playhead_makes_no_move(
+    run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld, tmp_path: Path
+) -> None:
+    code, out, _ = run_cli(["render", "frame", str(tmp_path / "f.png"), "--tc", "01:00:00:00"])
+    keys = parse_toon_keys(out)
+    assert code == 0 and "timecode" in keys and "playhead_moved" not in out
+    assert fake_world.calls_to("Timeline.SetCurrentTimecode") == []
+
+
+def test_frame_number_converts_at_the_timeline_rate(
+    run_cli: Run, fake_world: FakeWorld, tmp_path: Path
+) -> None:
+    code, _, _ = run_cli(["render", "frame", str(tmp_path / "f.png"), "--frame", "86448"])
+    assert code == 0
+    assert fake_world.calls_to("Timeline.SetCurrentTimecode") == [("01:00:02:00",)]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--frame", "-1"],
+        ["--tc", "1:2"],
+        ["--tc", "01:00:02:00", "--frame", "5"],
+    ],
+)
+def test_frame_bad_position_exits_2_before_connecting(
+    run_cli: Run, fake_world: FakeWorld, tmp_path: Path, extra: list[str]
+) -> None:
+    code, out, _ = run_cli(["render", "frame", str(tmp_path / "f.png"), *extra])
+    assert code == 2 and "VALIDATION_ERROR" in out
+    assert fake_world.calls == []
+
+
+def test_frame_to_timecode_counts_a_rounded_rate() -> None:
+    assert render_frame.frame_to_timecode(86400, 23.976) == "01:00:00:00"
+    assert render_frame.frame_to_timecode(86448, 24.0) == "01:00:02:00"
+    with pytest.raises(Exception, match="--frame must be 0 or more"):
+        render_frame.frame_to_timecode(-1, 24.0)
+    with pytest.raises(Exception, match="bad frame rate"):
+        render_frame.frame_to_timecode(5, 0.0)
+
+
+def test_frame_number_refuses_a_drop_frame_timeline(
+    run_cli: Run, fake_world: FakeWorld, tmp_path: Path
+) -> None:
+    timeline = _current(fake_world)
+    timeline.start_tc = "01:00:00;00"
+    code, out, _ = run_cli(["render", "frame", str(tmp_path / "f.png"), "--frame", "86448"])
+    assert code == 2 and "drop-frame" in out
+    assert fake_world.calls_to("Timeline.SetCurrentTimecode") == []
+    assert not (tmp_path / "f.png").exists()
+
+
+def test_frame_tc_failure_to_move_does_not_export(
+    run_cli: Run, fake_world: FakeWorld, tmp_path: Path
+) -> None:
+    fake_world.inject("Timeline.SetCurrentTimecode", False)
+    code, out, _ = run_cli(["render", "frame", str(tmp_path / "f.png"), "--tc", "01:00:02:00"])
+    assert code == 1 and "API_FAILED" in out
+    assert fake_world.calls_to("Project.ExportCurrentFrameAsStill") == []
 
 
 def test_spec_methods_are_declared_for_every_verb() -> None:

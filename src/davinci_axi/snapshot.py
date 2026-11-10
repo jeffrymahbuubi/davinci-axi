@@ -6,6 +6,7 @@ A snapshot writes only to disk. It never calls SaveProject and never changes Res
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,8 +21,17 @@ from davinci_axi.session import Session
 # Live finding (Resolve 21.1.1): ExportProject returns False for a project never saved since
 # it was created; one SaveProject fixes it.
 NEVER_SAVED_HINT = (
-    "A project that was never saved cannot be exported: run `davinci-axi project save --force`"
+    "If the project was never saved, it cannot be exported: run `davinci-axi project save --force`"
 )
+
+
+def resolve_out(text: str) -> Path:
+    """`--out`/`--snapshot-out` text to an absolute Path (expanduser + abspath, no symlinks).
+
+    Resolve writes the `.drp` relative to its own working directory, so a relative path must
+    be made absolute against the CLI's before it reaches `ExportProject`.
+    """
+    return Path(os.path.abspath(os.path.expanduser(text)))
 
 
 @dataclass(frozen=True)
@@ -33,6 +43,7 @@ class Snapshot:
     project: str
     created: str
     reason: str
+    manual: bool = False
 
 
 def snapshot_root() -> Path:
@@ -64,18 +75,20 @@ def take_snapshot(
     reason: str,
     out: Path | None = None,
     with_stills_luts: bool = True,
+    manual: bool = False,
 ) -> Snapshot:
     """Write `meta.json`, `state.json` and `project.drp` for the current project.
 
-    `out` overrides the snapshot directory. If the `.drp` export fails the directory and
-    `state.json` are kept and SNAPSHOT_FAILED names them in `detail`.
+    `manual` marks a snapshot the user asked for (`project snapshot`); `snapshot prune` keeps
+    those unless `--all`. `out` overrides the snapshot directory. If the `.drp` export fails the
+    directory and `state.json` are kept and SNAPSHOT_FAILED names them in `detail`.
     """
     project = session.require_project()
     name = project.GetName()
     now = datetime.now().astimezone()
     base_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{_slug(name)}"
     if out is not None:
-        snapshot_id, directory = base_id, out
+        snapshot_id, directory = base_id, Path(os.path.abspath(out))
     else:
         snapshot_id, directory = _unique_dir(snapshot_root(), base_id)
     try:
@@ -92,6 +105,7 @@ def take_snapshot(
                 "reason": reason,
                 "resolve_version": ".".join(str(n) for n in session.version),
                 "with_stills_luts": with_stills_luts,
+                "manual": manual,
             },
         )
     except OSError as exc:
@@ -108,10 +122,13 @@ def take_snapshot(
             f"Resolve could not export project {name} to {drp_path.name}",
             help=[
                 f"The state dump was kept at {collapse_home(state_path)}",
+                f"Resolve was asked to write {drp_path}: the directory must exist and be "
+                "writable by Resolve (davinci-axi passes an absolute path; "
+                "check the disk and permissions)",
                 "Check disk space and that the project is still open, then retry",
                 NEVER_SAVED_HINT,
             ],
-            detail={"state": str(state_path), "dir": str(directory)},
+            detail={"state": str(state_path), "dir": str(directory), "drp": str(drp_path)},
         )
     return Snapshot(
         id=snapshot_id,
@@ -121,4 +138,5 @@ def take_snapshot(
         project=name,
         created=now.isoformat(timespec="seconds"),
         reason=reason,
+        manual=manual,
     )

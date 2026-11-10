@@ -31,6 +31,7 @@ from davinci_axi.mutate import (
     check_snapshot_flags,
     with_current_timeline,
 )
+from davinci_axi.output import hint
 from davinci_axi.resolve_types import (
     FolderApi,
     Info,
@@ -79,15 +80,25 @@ class AudioProject(ProjectEdit, Protocol):
     def GenerateSpeech(self, speechSettings: Info) -> MediaPoolItemApi | None: ...
 
 
-def not_available(method: str, needs: str = STUDIO_AI) -> AxiError:
+def not_available(
+    method: str,
+    needs: str = STUDIO_AI,
+    *,
+    message: str | None = None,
+    help: list[str] | None = None,
+    detail: dict[str, object] | None = None,
+) -> AxiError:
+    """`NOT_AVAILABLE` for a False from an AI call; `message`, `help` and `detail` refine it."""
     return AxiError(
         "NOT_AVAILABLE",
-        f"Resolve returned False for {method}; this needs {needs}",
-        help=[
-            "Check the licence (Studio) and that AI Extras is installed",
+        message or f"Resolve returned False for {method}; this needs {needs}",
+        help=help
+        or [
+            "Check the licence (Studio) and that the AI package is installed",
+            hint("ai extras", "list the installed AI packages"),
             "Check that Resolve shows no dialog and the media is online",
         ],
-        detail={"method": method},
+        detail={"method": method, **(detail or {})},
     )
 
 

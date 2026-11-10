@@ -269,6 +269,7 @@ def check_range(clips: list[Any], span: tuple[int, int]) -> None:
         if frames.isdigit() and span[1] > int(frames):
             raise AxiError(
                 "VALIDATION_ERROR",
-                f"--out {span[1]} is past the end of {clip.GetName()} ({frames} frames)",
+                f"--out {span[1]} is past the end of {clip.GetName()} ({frames} frames); "
+                "for stills use --duration",
                 help=[f"Use --out {frames} or less"],
             )

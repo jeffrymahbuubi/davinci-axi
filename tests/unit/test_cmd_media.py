@@ -18,6 +18,7 @@ from davinci_axi.spec import CommandSpec
 Run = Callable[[list[str]], tuple[int, str, str]]
 
 SAVE, EXPORT = "ProjectManager.SaveProject", "ProjectManager.ExportProject"
+SET_CURRENT = "MediaPool.SetCurrentFolder"
 
 
 @pytest.fixture(autouse=True)
@@ -156,11 +157,11 @@ def test_import_dry_run_then_force_adds_clips_named_by_stem(
     text = f"{a},{b}"
     code, out, err = run_cli(["media", "import", text])
     assert (code, err) == (0, "") and _keys(out)["applied"] == "false"
-    assert "  clips,0,2" in out and "--force" in out
+    assert "  clips,1,3" in out and "--force" in out
     _assert_untouched(fake_world, tmp_path)
     out = _force_ok(run_cli, ["media", "import", text])
     keys = _keys(out)
-    assert keys["applied"] == "true" and keys["imported"] == '"a, b"'
+    assert keys["applied"] == "true" and keys["imported"] == "2/2"
     assert "folder_restored" not in keys
     assert fake_world.write_calls() == [SAVE, EXPORT, "MediaPool.ImportMedia"]
     assert fake_world.calls_to("MediaPool.ImportMedia") == [([str(a), str(b)],)]
@@ -345,7 +346,7 @@ def test_folder_add_then_delete(run_cli: Run, fake_world: FakeWorld, tmp_path: P
     _assert_untouched(fake_world, tmp_path)
     _force_ok(run_cli, ["media", "folder", "add", "Dailies"])
     assert [f.name for f in _root(fake_world).subfolders] == ["Footage", "Dailies"]
-    assert fake_world.write_calls() == [SAVE, EXPORT, "MediaPool.AddSubFolder"]
+    assert fake_world.write_calls() == [SAVE, EXPORT, "MediaPool.AddSubFolder", SET_CURRENT]
     code, out, _ = run_cli(["media", "folder", "add", "Dailies", "--force"])
     assert code == 1 and _keys(out)["code"] == "FOLDER_EXISTS"
     assert run_cli(["media", "folder", "add", "a/b"])[0] == 2

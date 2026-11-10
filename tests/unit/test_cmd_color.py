@@ -371,3 +371,29 @@ def test_a_refused_write_is_api_failed_and_names_the_snapshot(
     code, out, _ = run_cli(["color", "cdl", "set", "V1:1", "NodeIndex=1,Saturation=0.5", "--force"])
     assert code == 1 and parse_toon_keys(out)["code"] == "API_FAILED"
     assert "snapshot restore" in out
+
+
+def test_lut_set_warns_outside_the_lut_folders_and_hints_install_on_refusal(
+    run_cli: Run,
+    fake_world: FakeWorld,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from davinci_axi.commands.color_extras import INSTALL_HELP
+
+    monkeypatch.setenv("DAVINCI_AXI_LUT_DIRS", str(tmp_path / "LUT"))
+    lut = tmp_path / "film.cube"
+    lut.write_text("LUT_3D_SIZE 2\n", encoding="utf-8")
+    argv = ["color", "node", "lut", "set", "V1:1", "1", str(lut)]
+    code, out, _ = run_cli(argv)
+    assert code == 0 and "outside Resolve's LUT folders" in out and "color lut install" in out
+    inside = tmp_path / "LUT" / "film.cube"
+    inside.parent.mkdir()
+    inside.write_text("LUT_3D_SIZE 2\n", encoding="utf-8")
+    code, out, _ = run_cli(["color", "node", "lut", "set", "V1:1", "1", str(inside)])
+    assert code == 0 and "outside Resolve's LUT folders" not in out
+    fake_world.inject("Graph.SetLUT", False)
+    code, out, _ = run_cli([*argv, "--force"])
+    assert code == 1 and "API_FAILED" in out
+    help_lines = out.split("help[", 1)[1].splitlines()[1:]
+    assert help_lines[0].strip() == f'- "{INSTALL_HELP}"'

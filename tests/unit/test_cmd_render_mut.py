@@ -67,6 +67,8 @@ def test_add_dry_run_shows_the_job_and_writes_nothing(
     assert "  job,null,(new job)" in out
     assert f"  TargetDir,null,{out_dir}" in out
     assert "--force` to apply" in out
+    assert "stay as the project's render settings" in keys["settings_note"]
+    assert "--preset" in keys["settings_note"]
     assert fake_world.write_calls() == []
     assert not _snapshots(tmp_path).exists()
     assert len(_project(fake_world).render_jobs) == 2
@@ -78,6 +80,7 @@ def test_add_force_saves_snapshots_sets_settings_then_adds_the_job(
     code, out, _ = run_cli(_add(out_dir, "--force"))
     keys = parse_toon_keys(out)
     assert code == 0 and keys["applied"] == "true" and keys["job"] == "job-3"
+    assert "stay as the project's render settings" in keys["settings_note"]
     assert fake_world.write_calls() == [*SAVE, "Project.SetRenderSettings", "Project.AddRenderJob"]
     names = [f"{c}.{m}" for c, m, _ in fake_world.calls]
     assert names.index("Project.GetRenderJobList", names.index("Project.AddRenderJob")) > 0
@@ -177,6 +180,23 @@ def test_add_refuses_offline_media_unless_allowed(
     assert code == 0 and "applied: true" in out
 
 
+def test_add_video_quality_warns_when_it_looks_like_bits_per_second(
+    run_cli: Run, fake_world: FakeWorld, out_dir: Path
+) -> None:
+    code, out, _ = run_cli(_add(out_dir, "--set", "VideoQuality=20000000"))
+    assert code == 0 and "VideoQuality 20000000 looks like bits per second" in out
+    assert "kbps" in out
+    code, out, _ = run_cli(_add(out_dir, "--set", "VideoQuality=20000"))
+    assert code == 0 and "bits per second" not in out
+    assert fake_world.write_calls() == []
+
+
+def test_add_help_lists_the_set_keys_and_the_kbps_unit(run_cli: Run) -> None:
+    code, out, _ = run_cli(["render", "add", "--help"])
+    assert code == 0 and "VideoQuality" in out and "SelectAllFrames" in out
+    assert "kbps" in out and "MarkIn/MarkOut" in out
+
+
 @pytest.mark.parametrize(
     ("settings", "needle"),
     [
@@ -271,6 +291,22 @@ def test_start_polls_to_complete_with_progress_on_stderr(
     assert fake_world.write_calls() == [*SAVE, "Project.StartRendering"]
     assert fake_world.calls_to("Project.StartRendering") == [(["job-2"], False)]
     assert _status(fake_world, "job-2") == "Complete" and not _project(fake_world).rendering
+
+
+def test_start_rerender_dry_run_warns_that_the_file_is_overwritten(
+    run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld
+) -> None:
+    code, out, _ = run_cli(["render", "start", "job-1", "--rerender"])
+    assert code == 0 and parse_toon_keys(out)["applied"] == "false"
+    assert "overwrites in place: Master export.mov" in out
+    assert fake_world.write_calls() == []
+    code, out, _ = run_cli(["render", "start", "job-2"])
+    assert code == 0 and "overwrites in place" not in out
+
+
+def test_start_help_says_rerender_overwrites_in_place(run_cli: Run) -> None:
+    code, out, _ = run_cli(["render", "start", "--help"])
+    assert code == 0 and "overwrites the existing output file in" in out
 
 
 def test_start_dry_run_changes_nothing(

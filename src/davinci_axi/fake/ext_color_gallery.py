@@ -87,6 +87,9 @@ class FakeAlbum(FakeBase):
             number = self.stills.index(still) + 1
             target = folder / f"{filePrefix}_{number}.{format}"
             target.write_text(f"fake still: {still.label}\n", encoding="utf-8")
+            (folder / f"{filePrefix}_{number}.drx").write_text(
+                f"fake drx: {still.label}\n", encoding="utf-8"
+            )
         return True
 
     def DeleteStills(self, galleryStill: list[FakeStill]) -> bool:

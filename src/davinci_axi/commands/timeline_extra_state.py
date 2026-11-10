@@ -30,6 +30,7 @@ from davinci_axi.commands.timeline_extra_common import (
     run_custom_set,
     split_refs,
 )
+from davinci_axi.commands.timeline_marks import MARK_SHOW_SPEC
 from davinci_axi.commands.timeline_tracks import (
     TIMELINE_FLAG,
     context_words,
@@ -117,7 +118,10 @@ def run_mark_set(inv: Invocation) -> Result:
         changes=[Change(f"{k} mark", before[k], want) for k in kinds if before[k] != want],
         force_cmd=force_cmd(inv, *words, *context_words(inv)),
         snapshot="none",
-        extra={"note": "mark in/out is session state, not project data"},
+        extra={
+            "note": "mark in/out is session state, not project data; "
+            "frames count from the timeline start"
+        },
     )
 
     def apply() -> None:
@@ -291,9 +295,10 @@ _ITEMS = Positional("items", help="comma-separated items such as V1:1,V1:2")
 
 MARK_SPEC = CommandSpec(
     name="mark",
-    summary="Set or clear the timeline mark in and out (session state, no snapshot)",
+    summary="Show, set or clear the timeline mark in and out (relative frames; no snapshot)",
     reads_only=False,
     subcommands={
+        "show": MARK_SHOW_SPEC,
         "set": CommandSpec(
             name="set",
             summary="Set mark in and out, in frames from the timeline start",

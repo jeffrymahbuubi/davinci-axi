@@ -15,6 +15,8 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
 
+from davinci_axi import ai_state
+from davinci_axi.commands.ai_preflight import ai_mutation
 from davinci_axi.commands.audio_common import not_available
 from davinci_axi.commands.item_detail import Located, resolve_item, str_arg
 from davinci_axi.commands.render_common import force_words, methods_of
@@ -23,7 +25,6 @@ from davinci_axi.mutate import (
     Change,
     MutationPlan,
     check_snapshot_flags,
-    run_mutation,
     with_current_timeline,
 )
 from davinci_axi.output import hint
@@ -37,7 +38,7 @@ from davinci_axi.resolve_types import (
 )
 from davinci_axi.resolve_types_edit import MediaPoolEdit, ProjectEdit
 from davinci_axi.session import Session
-from davinci_axi.spec import CommandSpec, Invocation, Result
+from davinci_axi.spec import CommandSpec, Flag, Invocation, Result
 
 BUSY = frozenset({"Initializing", "Analyzing", "Cancelling"})
 UNREAD = "the call has no getter, so the result is not read back"
@@ -109,6 +110,12 @@ SCENE_CUTS = JobSpec("scene-cuts", "scene cuts", "GetDetectSceneCutsStatus")
 SUBTITLES = JobSpec("subtitles", "subtitles", "GetCreateSubtitlesFromAudioStatus")
 TRANSCRIBE = JobSpec("transcribe", "transcribe", "GetTranscribeAudioStatus")
 ALL_JOBS = (SLATE, REFRAME, SCENE_CUTS, SUBTITLES, TRANSCRIBE)
+JOB_COMMANDS = {"transcribe": "audio transcribe"}
+"""The command name each job's error is remembered under; the others are `ai <key>`."""
+
+
+def job_command(job: JobSpec) -> str:
+    return JOB_COMMANDS.get(job.key, f"ai {job.key}")
 
 
 def read_status(project: AiProject, job: JobSpec) -> Info:
@@ -152,6 +159,8 @@ def run_job(
     *,
     scope: Callable[[], AbstractContextManager[object]] | None = None,
     after: Callable[[bool], None] | None = None,
+    package: str | None = None,
+    advisory: bool = False,
 ) -> Result:
     """Start `job` with `start()` and follow its status; `plan.changes` is set here.
 
@@ -189,7 +198,7 @@ def run_job(
             after(wait)
         return {"status": status}
 
-    return run_mutation(inv, session, plan, apply, verify)
+    return ai_mutation(inv, session, plan, apply, verify, package=package, advisory=advisory)
 
 
 # ---- one timeline item ----------------------------------------------------------------------
@@ -233,6 +242,7 @@ def item_call(
     *,
     irreversible: bool = False,
     extra: dict[str, object] | None = None,
+    package: str | None = None,
 ) -> Result:
     """One call on `sel.item` with no getter (KTD23): its return value is the check."""
     plan = MutationPlan(
@@ -250,7 +260,7 @@ def item_call(
         with timeline_scope(sel.session, sel.timeline, plan):
             require_ok(call(sel.item), method)
 
-    return run_mutation(inv, sel.session, plan, apply, lambda: {"called": True})
+    return ai_mutation(inv, sel.session, plan, apply, lambda: {"called": True}, package=package)
 
 
 ITEM_READS = methods_of(
@@ -263,7 +273,8 @@ ITEM_READS = methods_of(
 # ---- ai status ------------------------------------------------------------------------------
 
 
-def _row(job: JobSpec, info: Info) -> dict[str, object]:
+def _row(job: JobSpec, info: Info, errors: dict[str, ai_state.LastError]) -> dict[str, object]:
+    last = errors.get(job_command(job))
     index, total = info.get("CurrentClipIndex"), info.get("TotalClips")
     return {
         "job": job.key,
@@ -272,24 +283,47 @@ def _row(job: JobSpec, info: Info) -> dict[str, object]:
         "clip": f"{index}/{total}" if index is not None and total is not None else None,
         "eta_s": info.get("EstimatedTimeRemaining"),
         "error": info.get("Error"),
+        "last_error": ai_state.label(last) if last is not None else None,
     }
 
 
 def run_status(inv: Invocation) -> Result:
     project = cast(AiProject, inv.connect().require_project())
-    rows = [_row(job, read_status(project, job)) for job in ALL_JOBS]
+    cleared = ai_state.clear() if inv.args.get("clear_errors") else None
+    errors = ai_state.load()
+    rows = [_row(job, read_status(project, job), errors) for job in ALL_JOBS]
     busy = [str(r["job"]) for r in rows if r["status"] in BUSY]
     data: dict[str, object] = {"project": project.GetName(), "busy": ", ".join(busy) or "none"}
+    if cleared is not None:
+        data["errors_cleared"] = cleared
     data["jobs"] = rows
+    known = {job_command(job) for job in ALL_JOBS}
+    other = [
+        {"command": e.command, "code": e.code, "at": e.at}
+        for key, e in errors.items()
+        if key not in known
+    ]
+    if other:
+        data["other_errors"] = other
     help_lines = [hint("ai scene-cuts --no-wait", "start a job and check back here")]
+    if errors:
+        help_lines.append(hint("ai status --clear-errors", "forget the remembered errors"))
     return Result(data, help_lines)
 
 
 STATUS_SPEC = CommandSpec(
     name="status",
     summary="Show the status of the five analysis jobs (slate, reframe, scene cuts, subtitles, "
-    "transcribe)",
+    "transcribe) and the last error of each AI verb",
     run=run_status,
+    flags=(
+        Flag(
+            "clear-errors",
+            "bool",
+            False,
+            help="forget the remembered last errors (local state only)",
+        ),
+    ),
     examples=("davinci-axi ai status", "davinci-axi ai status --json"),
     methods=methods_of(
         Project=(

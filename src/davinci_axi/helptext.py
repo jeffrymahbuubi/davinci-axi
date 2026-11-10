@@ -16,7 +16,7 @@ def _default_value(flag: Flag) -> object:
 def _flag_label(flag: Flag) -> str:
     name = flag.name.lstrip("-")
     if flag.kind == "bool":
-        return f"--{name}"
+        return f"--{name}/--no-{name}" if flag.default is True else f"--{name}"
     return f"--{name} <{'a,b' if flag.kind == 'list' else flag.kind}>"
 
 
@@ -51,6 +51,8 @@ def render(spec: CommandSpec, path: tuple[str, ...] = ()) -> dict[str, object]:
         ]
     if spec.flags:
         doc["flags"] = _flag_rows(spec.flags)
+    if spec.notes:
+        doc["notes"] = list(spec.notes)
     doc["global_flags"] = _flag_rows(GLOBAL_FLAGS)
     doc["examples"] = list(spec.examples) or [f"{BIN} {full} --help"]
     return doc

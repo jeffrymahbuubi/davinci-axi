@@ -116,7 +116,11 @@ def _item_infos(inv: Invocation, paths: list[str]) -> list[dict[str, Any]]:
             help=["Valid example: --in-frame 0 --out-frame 100"],
         )
     if start is not None and end is not None and start > end:
-        raise AxiError("VALIDATION_ERROR", f"--in-frame {start} is after --out-frame {end}")
+        raise AxiError(
+            "VALIDATION_ERROR",
+            f"--in-frame {start} is after --out-frame {end}",
+            help=["Valid example: --in-frame 0 --out-frame 100"],
+        )
     infos: list[dict[str, Any]] = []
     for path in paths:
         info: dict[str, Any] = {"media": path}

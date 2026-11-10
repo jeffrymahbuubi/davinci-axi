@@ -136,6 +136,14 @@ def parse_settings(raw: str | None) -> dict[str, object]:
     return {key: coerce_setting(key, text) for key, text in pairs.items()}
 
 
+def settings_warning(settings: dict[str, object]) -> str:
+    """A hint when VideoQuality looks like bits per second (it is kbps); empty otherwise."""
+    quality = settings.get("VideoQuality")
+    if isinstance(quality, int) and not isinstance(quality, bool) and quality >= 1_000_000:
+        return f"VideoQuality {quality} looks like bits per second; VideoQuality is kbps"
+    return ""
+
+
 def target_dir(inv: Invocation) -> Path:
     """The absolute `--target-dir`, or the error for each dialog Resolve would otherwise show."""
     path = Path(str(inv.args["target_dir"])).expanduser().resolve()

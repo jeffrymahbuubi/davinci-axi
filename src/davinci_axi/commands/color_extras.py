@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import filecmp
+import os
 import re
+import shlex
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -29,7 +33,17 @@ from davinci_axi.commands.color_common import (
     project_write,
     verb,
 )
-from davinci_axi.commands.item_markers import ITEM_FLAGS, ITEM_ID, open_target
+from davinci_axi.commands.color_targets import (
+    CALLED_NOTE,
+    ITEMS,
+    GraphTarget,
+    Step,
+    called_step,
+    check_node_each,
+    open_targets,
+    targets_write,
+)
+from davinci_axi.commands.item_markers import ITEM_FLAGS, ITEM_ID, Target, open_target
 from davinci_axi.commands.items import TIMELINE_FLAG
 from davinci_axi.commands.project_io import tree_bytes
 from davinci_axi.errors import AxiError, api_failed, not_found
@@ -42,7 +56,8 @@ from davinci_axi.mutate import (
     with_current_timeline,
     with_page,
 )
-from davinci_axi.output import collapse_home
+from davinci_axi.output import collapse_home, hint
+from davinci_axi.paths import lut_dirs, lut_install_dir
 from davinci_axi.resolve_types import TimelineApi
 from davinci_axi.spec import CommandSpec, Flag, Invocation, Positional, Result
 
@@ -64,6 +79,11 @@ SWITCH = "Project.GetCurrentTimeline Project.SetCurrentTimeline"
 THUMBNAIL_SETTLE_READS = 12  # extra reads after a page switch, ~3 s at the interval below
 THUMBNAIL_SETTLE_INTERVAL = 0.25
 OVERWRITE = Flag("overwrite", "bool", False, help="replace the file if it exists")
+SUBDIR = re.compile(r"[A-Za-z0-9 _.-]+")
+INSTALL_HELP = (
+    "Run `davinci-axi color lut install <file> --force` to copy it in and refresh, "
+    "then pass the printed path"
+)
 
 
 class ThumbnailTimeline(TimelineApi, Protocol):
@@ -164,6 +184,85 @@ def run_lut_refresh(inv: Invocation) -> Result:
     )
 
 
+def lut_path_warning(path: Path) -> str:
+    """Empty when `path` is inside a LUT folder Resolve scans; else why SetLUT may refuse it."""
+    dirs = lut_dirs()
+    resolved = path.resolve()
+    if any(resolved.is_relative_to(d.resolve()) for d in dirs):
+        return ""
+    shown = ", ".join(collapse_home(d) for d in dirs)
+    return (
+        f"{collapse_home(path)} is outside Resolve's LUT folders ({shown}); SetLUT accepts only "
+        f"LUTs Resolve has discovered there. {INSTALL_HELP}"
+    )
+
+
+def _writable(folder: Path) -> bool:
+    """Whether `folder`, or the nearest ancestor that exists, can be written to."""
+    probe = folder
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return os.access(probe, os.W_OK)
+
+
+def run_lut_install(inv: Invocation) -> Result:
+    check_snapshot_flags(inv)
+    src = Path(inv.positionals["file"]).expanduser().resolve()
+    if not src.is_file():
+        raise not_found("file", collapse_home(src), "Check the path of the LUT file")
+    subdir = str(inv.args.get("subdir") or "")
+    if subdir and (not SUBDIR.fullmatch(subdir) or subdir in (".", "..")):
+        raise AxiError(
+            "VALIDATION_ERROR",
+            f"--subdir {subdir!r} must be a plain folder name",
+            help=["Use letters, digits, spaces and . _ - only, like --subdir my-project"],
+        )
+    overwrite = bool(inv.args.get("overwrite"))
+    dest = lut_install_dir() / subdir / src.name
+    refuse_existing(dest, overwrite)
+    session = inv.connect()
+    project = cast(ColorProject, session.require_project())
+    shown = collapse_home(dest)
+
+    def call() -> bool:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        if project.RefreshLUTList():
+            return True
+        raise api_failed(
+            "Project.RefreshLUTList",
+            f"the file was copied to {shown} but Resolve did not refresh its LUT list",
+        )
+
+    def read() -> dict[str, object]:
+        same = dest.is_file() and filecmp.cmp(src, dest, shallow=False)
+        return {"installed": shown if same else None, "called": True}
+
+    words = ["color", "lut", "install", inv.positionals["file"]]
+    if subdir:
+        words += ["--subdir", subdir]
+    if overwrite:
+        words.append("--overwrite")
+    return project_write(
+        inv,
+        session,
+        command="color lut install",
+        words=words,
+        changes=[Change("installed", None, shown), Change("called", False, True)],
+        call=call,
+        read=read,
+        fail="Project.RefreshLUTList",
+        snapshot="none",
+        warning="" if _writable(dest.parent) else f"{collapse_home(dest.parent)} is not writable",
+        extra={
+            "lut_arg": f"{subdir}/{src.name}" if subdir else src.name,
+            "bytes": src.stat().st_size,
+            "read_back": "the copy is compared with the source; the refresh is the call result",
+        },
+        next_lines=[hint(f"color node lut set <target> 1 {shlex.quote(str(dest))}", "apply it")],
+    )
+
+
 def parse_cdl(text: str) -> dict[str, object]:
     """`NodeIndex=1,Slope=1 1 1` -> the CDL dict; every problem is VALIDATION_ERROR (exit 2)."""
     pairs = parse_assignments(text)
@@ -198,22 +297,22 @@ def run_cdl_set(inv: Invocation) -> Result:
     given = parse_assignments(inv.positionals["assignments"])
     cdl = parse_cdl(inv.positionals["assignments"])
     neutral = [key for key in CDL_NEUTRAL if key not in given]
-    target = open_target(inv)
-    item = color_item(target)
-    graph = item.GetNodeGraph()
-    if graph is None:
-        raise api_failed("TimelineItem.GetNodeGraph", f"item {target.ref} has no node graph")
-    count, index = graph.GetNumNodes(), int(cast(int, cdl["NodeIndex"]))
-    if not 1 <= index <= count:
-        raise not_found("node", str(index), f"This graph has {count} nodes (numbered from 1)")
-    return called_write(
+    targets = open_targets(inv, graphs=False)
+    check_node_each(targets, int(cast(int, cdl["NodeIndex"])))
+
+    def step(entry: GraphTarget) -> Step:
+        item = color_item(cast(Target, entry.target))
+        return called_step(targets, entry, lambda: item.SetCDL(cdl))
+
+    return targets_write(
         inv,
-        target,
+        targets,
         command="color cdl set",
-        words=["color", "cdl", "set", target.ref, inv.positionals["assignments"]],
-        call=lambda: item.SetCDL(cdl),
+        words=["color", "cdl", "set", inv.positionals["target"], inv.positionals["assignments"]],
+        step=step,
         fail="TimelineItem.SetCDL",
         extra={
+            "read_back": CALLED_NOTE,
             "cdl": " ".join(f"{k}={v}" for k, v in cdl.items()),
             **({"neutral": f"{', '.join(neutral)} sent as neutral values"} if neutral else {}),
         },
@@ -262,9 +361,28 @@ THUMBNAIL_SPEC = verb(
     "Project.GetCurrentTimeline Timeline.GetCurrentClipThumbnailImage",
     disk=True,
 )
+LUT_INSTALL_SPEC = verb(
+    "install",
+    "Copy a LUT file into Resolve's LUT folder and refresh the list (no project state changes)",
+    run_lut_install,
+    (Positional("file", help="the .cube, .3dl or .vlut file to install"),),
+    (
+        *MUTATION_FLAGS,
+        OVERWRITE,
+        Flag("subdir", "str", None, help="folder inside the LUT folder, e.g. my-project"),
+    ),
+    "davinci-axi color lut install ~/luts/film.cube --subdir my-project",
+    "Project.RefreshLUTList",
+    notes=(
+        "Resolve's master LUT folder may need the right permissions; the dry run warns if it "
+        "is not writable.",
+        "Set DAVINCI_AXI_LUT_DIRS (colon-separated) to name custom LUT folders: the first one "
+        "is installed into.",
+    ),
+)
 LUT_SPEC = parent(
     "lut",
-    "Export an item's LUT, or refresh Resolve's LUT list",
+    "Export an item's LUT, install a LUT file into Resolve's LUT folder, or refresh the LUT list",
     {
         "export": verb(
             "export",
@@ -280,6 +398,7 @@ LUT_SPEC = parent(
             "TimelineItem.ExportLUT Project.GetCurrentTimeline Project.SetCurrentTimeline",
             disk=True,
         ),
+        "install": LUT_INSTALL_SPEC,
         "refresh": verb(
             "refresh",
             "Refresh Resolve's LUT list (changes no project state; not read back)",
@@ -290,7 +409,9 @@ LUT_SPEC = parent(
             "Project.RefreshLUTList",
         ),
     },
-    "davinci-axi color lut export V1:1 ~/look.cube --size 33|davinci-axi color lut refresh --force",
+    "davinci-axi color lut export V1:1 ~/look.cube --size 33"
+    "|davinci-axi color lut install ~/luts/film.cube --subdir my-project --force"
+    "|davinci-axi color lut refresh --force",
 )
 
 CDL_SPEC = parent(
@@ -299,15 +420,21 @@ CDL_SPEC = parent(
     {
         "set": verb(
             "set",
-            "Set Slope, Offset, Power and Saturation of one node",
+            "Set Slope, Offset, Power and Saturation of one node of an item or item list",
             run_cdl_set,
-            (ITEM_ID, ASSIGNMENTS),
+            (ITEMS, ASSIGNMENTS),
             ITEM_FLAGS,
-            "davinci-axi color cdl set V1:1 NodeIndex=1,Slope='1.1 1 0.9'",
+            "davinci-axi color cdl set V1:1 NodeIndex=1,Slope='1.1 1 0.9'"
+            "|davinci-axi color cdl set V1:1,V1:3 NodeIndex=1,Saturation=0.8",
             f"{SWITCH} TimelineItem.GetNodeGraph TimelineItem.SetCDL Graph.GetNumNodes",
         )
     },
     "davinci-axi color cdl set V1:1 NodeIndex=1,Saturation=0.8",
+    notes=(
+        "SetCDL is item-only: shared graphs (timeline, group:<name>:pre|post) are not accepted.",
+        "Resolve has no GetCDL; confirm a CDL with `color graph --item V1:1` (node tools) "
+        "or export the node with `color lut export`.",
+    ),
 )
 CACHE_SPEC = parent(
     "cache",

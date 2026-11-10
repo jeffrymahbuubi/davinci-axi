@@ -8,8 +8,9 @@ A command line tool that reports the live state of DaVinci Resolve Studio in a c
 - DaVinci Resolve **Studio** 21.1 or newer, running. The free edition does not allow external scripting.
 - In Resolve, set **Preferences > System > General > External scripting using** to **Local**, then restart Resolve.
 - Python 3.10 or newer and [uv](https://docs.astral.sh/uv/). The tool has no runtime dependencies.
+- Optional: `ffmpeg` and `ffprobe` on `PATH` (or `FFMPEG`/`FFPROBE`) for `media analyze`, `audio loudness`, `audio gaps`, `timeline check --audio`, `render verify` (and `render start --verify`), `render master`, `render sheet` and the contact-sheet fallback.
 
-If Resolve is not ready, the tool says why and how to fix it. The connection failures are `RESOLVE_NOT_INSTALLED`, `RESOLVE_NOT_RUNNING`, `SCRIPTING_DISABLED`, `FREE_EDITION` and `RESOLVE_TIMEOUT`.
+If Resolve is not ready, the tool says why and how to fix it. The connection failures are `RESOLVE_NOT_INSTALLED`, `RESOLVE_NOT_RUNNING`, `SCRIPTING_DISABLED`, `FREE_EDITION` and `RESOLVE_TIMEOUT`. Just after Resolve launches, `RESOLVE_STARTING` means it is still loading: the tool retries within `--timeout`, so retry or raise it.
 
 ## Install
 
@@ -17,44 +18,42 @@ If Resolve is not ready, the tool says why and how to fix it. The connection fai
 uv tool install git+https://github.com/jeffrymahbuubi/davinci-axi
 ```
 
+`davinci-axi --version` prints `0.2.0+<commit>` for an install from a git URL. An install from a local
+checkout adds a note that the commit is the checkout's HEAD, so reinstall after new commits.
+
 To run it once without installing:
 
 ```bash
 uvx --from git+https://github.com/jeffrymahbuubi/davinci-axi davinci-axi
 ```
 
-The `otio` extra pulls in OpenTimelineIO for features that need it. Nothing in this version does.
+The `otio` extra pulls in OpenTimelineIO for features that need it. Nothing in this version does. The `sheet` extra installs Pillow for the contact sheet of `timeline stills --sheet` and `media stills --sheet` (`uv tool install --with pillow ...`); without it the command falls back to ffmpeg when present.
 
 ## Commands
 
 Run `davinci-axi` with no arguments for the home view: the Resolve version and edition, the current project and timelines, the render queue counts, and the commands to try next.
 
-| Command | What it does | Example |
+| Group | What it is for | Key commands |
 | --- | --- | --- |
-| `davinci-axi home` | Show live Resolve state (also the default with no arguments) | `davinci-axi` |
-| `davinci-axi projects` | List the projects in the current project-manager folder | `davinci-axi projects --fields name,created` |
-| `davinci-axi timelines` | List the timelines of the current project | `davinci-axi timelines` |
-| `davinci-axi timeline` | Create, duplicate, rename, delete or open a timeline; show one timeline in detail (its clip in the media pool, the current video item); set settings and timecode; edit tracks and markers (including custom marker data); export to or import from OTIO, FCPXML, DRT, EDL or AAF; append or build from media pool clips, make compound clips, insert generators, OFX generators and titles, import an AAF into the timeline; set mark in/out and output blanking, convert to stereo, analyze Dolby Vision, list the selection (dry run unless `--force`; export is disk-only and never overwrites without `--overwrite`; mark in/out takes no snapshot) | `davinci-axi timeline append A003_dusk --track 2 --force` |
-| `davinci-axi items` | List the items of a timeline across tracks | `davinci-axi items --track-type audio` |
-| `davinci-axi item` | Show one timeline item in detail, or change it: set properties, rename, enable/disable, colour, flags, markers (including custom marker data), speed, fades, delete; link and unlink items, add transitions, update sidecars, manage takes, set output blanking, read stereo convergence and floating windows (dry run unless `--force`) | `davinci-axi item link V1:1,A1:1 --force` |
-| `davinci-axi media` | List and show media pool clips, or change them: import, rename, move, relink, unlink, delete, metadata (and metadata export), colour, flags, markers (including custom marker data), proxies, folders (and folder import/export); refresh, selection, third-party metadata, clip properties, replace, full-res link, growing-file monitor, mark in/out, stereo clips (dry run unless `--force`) | `davinci-axi media rename A001_beach --to beach_wide --force` |
-| `davinci-axi render` | List presets, formats and the queue; add, start, stop or delete render jobs; quick export; export the current frame; set format, codec and mode; save, update, delete, load, import or export render presets (dry run unless `--force`; jobs report progress on stderr) | `davinci-axi render start job-2 --force` |
-| `davinci-axi fusion` | Read the Fusion comps of a timeline item (comps, tools, inputs, graph, registry, undo stack), or change them: add, set, connect, rename, move, bypass or delete tools, keyframes, undo, comp add/import/export/load/rename/delete, Fusion clips, inserts and the output cache (dry run unless `--force`) | `davinci-axi fusion tool add Blur --item V1:2 --force` |
-| `davinci-axi color` | Read and change grades: node graphs, nodes, LUTs, DRX, CDL, grade copy, versions, colour groups, stills and albums, cache, thumbnails and LUT export (dry run unless `--force`) | `davinci-axi color graph --item V1:2` |
-| `davinci-axi audio` | Fairlight and audio: normalize, align, voice isolation, audio mapping, Fairlight presets, insert audio, sync, transcribe, classify and speech (dry run unless `--force`; jobs report progress on stderr) | `davinci-axi audio normalize A1:1 --loudness -24 --force` |
-| `davinci-axi ai` | Studio AI analysis: `ai status` shows the job statuses; slate, smart reframe, scene cuts and subtitles are polled jobs (progress on stderr, `--no-wait`); intellisearch, magic mask, stabilize, deblur and multicam create/smart-switch/flatten run once. A False from Resolve is `NOT_AVAILABLE` (needs Studio with AI Extras); `flatten` and `intellisearch reset` are irreversible (dry run unless `--force`) | `davinci-axi ai scene-cuts --force` |
-| `davinci-axi storage` | Browse Media Storage and add media to the pool; clip and timeline mattes; the media clone tool (`clone start` polls, takes no snapshot because it writes outside the project) (dry run unless `--force`) | `davinci-axi storage volumes` |
-| `davinci-axi presets` | List, load, save, update, delete, import or export layout, keyboard, user-preference and burn-in presets; `update` and `delete` export a copy first (dry run unless `--force`) | `davinci-axi presets layout list` |
-| `davinci-axi dctl` | Validate a DCTL file, or write an encrypted copy | `davinci-axi dctl validate ~/LUT/grade.dctl` |
-| `davinci-axi project snapshot` | Export the current project to a .drp plus a JSON state dump on disk | `davinci-axi project snapshot --reason before-regrade` |
-| `davinci-axi project` | Create, open, save, rename, close, delete, import, export or archive projects; manage project folders, settings and settings presets; `restore`, `db` and `cloud` (dry run unless `--force`) | `davinci-axi project rename --to new-name --force` |
-| `davinci-axi snapshot` | List, show, restore or delete project snapshots; `restore` imports a snapshot as a new project and never overwrites (dry run unless `--force`) | `davinci-axi snapshot restore 20261027-013000-sample-project --force` |
-| `davinci-axi page` | Show the open Resolve page or switch to another (`media cut edit fusion color fairlight deliver`); UI state only, no snapshot (dry run unless `--force`) | `davinci-axi page set color --force` |
-| `davinci-axi app` | Resolve-level status (`app show`: version string, page, current project/timeline, media pool id, gallery album) and switches: high priority on/off, keyframe mode show/set (`all color sizing`), disable background tasks until Resolve restarts; no snapshot (dry run unless `--force`) | `davinci-axi app keyframe-mode set color --force` |
-| `davinci-axi skill gen` | Write skills/davinci-axi/SKILL.md from the command registry (or verify it) | `davinci-axi skill gen --check` |
-| `davinci-axi hook install` | Add or remove a SessionStart hook that runs `davinci-axi` when an agent session begins | `davinci-axi hook install --agent claude-code --scope project` |
+| `home` | Live Resolve state: version, project, timelines, queue, next commands (default with no arguments) | `davinci-axi` |
+| `projects`, `timelines`, `items` | Lists: projects in the current folder, timelines of the project, items across tracks | `items --fields name,fade_in,volume`, `items --track-type audio`, `projects --fields name,created` |
+| `project` | Project lifecycle, folders, settings, databases; `project snapshot` writes a restorable .drp plus state dump | `project snapshot --reason before-regrade`, `project settings show` |
+| `timeline` | Create, open, inspect and lint timelines; tracks, markers, in/out marks, settings; import and export; append, build, insert, compound; batch transitions and fades; title cards and music beds; storyboard stills; diff two timelines | `timeline check --target 2m-5m`, `timeline append A003_dusk --track 2 --force`, `timeline title add 'Dusk' --at 01:00:32:00 --force` |
+| `item` | One timeline item: show it, set properties (one item or a row file), speed, fades, markers, transitions, takes; delete lists | `item V1:2`, `item set --edl props.csv --force`, `item delete V1:2,V1:5 --ripple --force` |
+| `media` | Media pool: list, show, import, folders, properties, relink, markers, marks, stills; `analyze` measures source files with ffmpeg | `media --fields name,resolution,frames`, `media analyze --folder Master --rgb`, `media property set --used 'Super Scale=1' --force` |
+| `render` | Presets, formats and the queue; add, start, stop, delete jobs; `deliver` to a size cap; `verify`, `master` and `sheet` a rendered file with ffmpeg; `frame` stills; project render settings | `render deliver --target-dir ~/out --max-mb 50 --mkdir --force`, `render verify ~/out/edit.mp4 --max-mb 50 --lufs -14`, `render master ~/out/edit.mp4 --lufs -14 --force` |
+| `fusion` | Fusion comps of an item: tools, wiring, keyframes, undo; insert titles and generators | `fusion tool add Blur --item V1:2 --force`, `fusion insert title 'Text+' --force` |
+| `color` | Grades: node graphs, LUTs, DRX, CDL (one item or a row file), versions, groups, gallery stills | `color cdl set V1:1 'NodeIndex=1,Slope=1 1 1,...' --force`, `color cdl set --edl grades.csv --force`, `color still grab --force` |
+| `audio` | Fairlight: normalize, gain, voice isolation, mappings, transcribe, speech; `loudness` and `gaps` measure the timeline's sound with ffmpeg | `audio normalize A1:1 --loudness -24 --force`, `audio loudness`, `audio gaps --out gaps.csv` |
+| `ai` | Studio AI jobs with an Extras preflight: scene cuts, subtitles, reframe, magic mask, multicam | `ai extras`, `ai scene-cuts --force` |
+| `storage` | Media Storage browsing, adding media, mattes, the clone tool | `storage volumes`, `storage clone start /src /dst --force` |
+| `presets` | Layout, keyboard, user-preference and burn-in presets | `presets layout list` |
+| `dctl` | Validate or encrypt DCTL files | `dctl validate ~/LUT/grade.dctl` |
+| `snapshot` | List, show, diff, restore, delete and prune the safety snapshots | `snapshot diff <id>`, `snapshot restore <id> --force`, `snapshot prune --keep 5` |
+| `page`, `app` | The open page and Resolve-level switches (UI state, no snapshot) | `page set color --force`, `app show` |
+| `skill gen`, `hook install` | Generate the agent skill file; add the SessionStart hook | `skill gen --check`, `hook install --agent claude-code` |
 
-Run `davinci-axi <command> --help` for the flags and examples of one command. Flags are checked before the tool connects to Resolve, so a usage error never touches the application.
+Every command that changes Resolve is a dry run until `--force`. Run `davinci-axi <group> --help` for the subcommands and `davinci-axi <group> <verb> --help` for flags, notes and examples; the notes hold the Resolve quirks measured on 21.1.1. `davinci-axi help <word>` finds a command by word. Flags are checked before the tool connects to Resolve, so a usage error never touches the application.
 
 Global flags:
 
@@ -62,9 +61,7 @@ Global flags:
 - `--debug`: print tracebacks to stderr.
 - `--timeout <seconds>`: how long to wait for Resolve (default 3, env `DAVINCI_AXI_TIMEOUT`).
 
-List commands also take `--fields a,b,c` and `--limit N` (default 100). `items` takes `--timeline`, `--track-type video|audio|subtitle` and `--track`. `item` takes `--timeline` and `--full`.
-
-`project snapshot` takes `--out <dir>`, `--no-stills-luts` and `--reason <text>`. `hook install` takes `--agent claude-code|codex` (default `claude-code`), `--scope project|user` (default `project`), `--dir <path>` (project scope only, default the current directory), `--remove` and `--check`.
+List commands also take `--fields a,b,c` and `--limit N` (default 100); a list cut by `--limit` carries `truncated: true`. A bool flag that defaults to on shows as `--x/--no-x` in `--help`. Renamed flags keep working under their old names with a note: `media folder add --in` is now `--parent`, and `color still grab --all` is now `--source`.
 
 ### Output and exit codes
 
@@ -87,8 +84,13 @@ Output is TOON: `key: value` lines and `name[N]{fields}:` tables. Errors print `
 - `snapshot restore <id>` imports a snapshot as a new project and never overwrites an existing one.
 - Irreversible deletes are marked `irreversible: true` with a `warning`, in the dry run and in the result.
 - `--no-snapshot` is refused unless `DAVINCI_AXI_ALLOW_UNSNAPSHOTTED=1` is set.
+- Batches under one snapshot: take one with `davinci-axi project snapshot --reason before-batch`, then run each change with `DAVINCI_AXI_ALLOW_UNSNAPSHOTTED=1 davinci-axi ... --force --no-snapshot`. `snapshot restore <id>` brings the whole batch back. For many items at once, prefer the row files (`item set --edl`, `color cdl set --edl`, `timeline marker add --edl`) and the list verbs (`media property set --used`) and the batch verbs (`timeline fades`, `timeline transitions`, `item delete <list>`), which take one snapshot each.
 - The tool never opens, closes, saves or deletes projects to answer a question; it reads the current state.
 - Tests never reach a real Resolve unless you pass `--live` (see below).
+
+### Known API limits (Resolve 21.1.1)
+
+The scripting API cannot: add OFX to a node or add a node (`color grade init` refuses unless `--try`); read a CDL back; create the first node from a DRX; read a magic mask back; measure loudness; read a render bit rate back; trim an item; set a still's duration on append (`--duration` on append covers it); pick the track for a title insert (inserts land on V1; `timeline title add` works around it with a compound clip); render effects added through the API to an item's Fusion comp (standalone Text+ titles do render). Each command's `--help` notes say which of these it hits.
 
 ### Long-running jobs
 

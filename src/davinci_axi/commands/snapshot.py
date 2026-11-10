@@ -2,17 +2,23 @@
 
 `list` and `show` only read the snapshot directories on disk and never connect to Resolve.
 `restore` imports a snapshot's `.drp` as a NEW project (never overwriting one, R31) after the
-usual save and safety snapshot. `delete` removes a snapshot directory from disk; it is the one
-irreversible verb here and refuses any directory that is not inside the snapshot root.
+usual save and safety snapshot. `delete` and `prune` remove snapshot directories from disk; they
+are the irreversible verbs here and refuse any directory that is not inside the snapshot root.
 """
 
 from __future__ import annotations
 
 import shlex
 import shutil
-from pathlib import Path
 
+from davinci_axi.commands.diff_cmds import SNAPSHOT_DIFF_SPEC
 from davinci_axi.commands.project_io import clean_name, edit_manager, exists_error, next_steps
+from davinci_axi.commands.snapshot_prune import (  # noqa: F401  (re-exported for callers and tests)
+    PRUNE_SPEC,
+    inside_root,
+    parse_duration,
+    prune_candidates,
+)
 from davinci_axi.errors import AxiError, api_failed
 from davinci_axi.mutate import (
     MUTATION_FLAGS,
@@ -22,7 +28,14 @@ from davinci_axi.mutate import (
     force_cmd,
     run_mutation,
 )
-from davinci_axi.output import apply_limit, collapse_home, empty_state, hint, select_fields
+from davinci_axi.output import (
+    apply_limit,
+    collapse_home,
+    empty_state,
+    hint,
+    page_meta,
+    select_fields,
+)
 from davinci_axi.snapshot import snapshot_root
 from davinci_axi.snapshot_index import SnapshotMeta, counts, find_snapshot, list_snapshots
 from davinci_axi.spec import LIST_FLAGS, CommandSpec, Flag, Invocation, Positional, Result
@@ -108,7 +121,7 @@ def run_list(inv: Invocation) -> Result:
     warnings: list[str] = []
     snapshots = [m for m in list_snapshots(root, warnings) if wanted is None or m.project == wanted]
     page, total = apply_limit([_row(m) for m in snapshots], limit)
-    data: dict[str, object] = {"total": total}
+    data: dict[str, object] = page_meta(len(page), total)
     if page:
         data["snapshots"] = select_fields(page, DEFAULT_FIELDS, requested)
     else:
@@ -205,17 +218,10 @@ def run_restore(inv: Invocation) -> Result:
     return run_mutation(inv, session, plan, apply, verify)
 
 
-def _inside_root(meta: SnapshotMeta, root: Path) -> bool:
-    """True only for a real directory whose resolved path sits under the resolved root."""
-    if meta.dir.is_symlink():
-        return False
-    return meta.dir.resolve().is_relative_to(root.resolve())
-
-
 def run_delete(inv: Invocation) -> Result:
     root = snapshot_root()
     meta = find_snapshot(root, inv.positionals["id"])
-    if not _inside_root(meta, root):
+    if not inside_root(meta, root):
         raise AxiError(
             "WRITE_REFUSED",
             f"snapshot {meta.id} is not inside the snapshot root {collapse_home(root)}",
@@ -304,19 +310,21 @@ DELETE_SPEC = CommandSpec(
     ),
     reads_only=False,
 )
-
 SPEC = CommandSpec(
     name="snapshot",
-    summary="List, show, restore and delete project snapshots; restore creates a new project",
+    summary="List, show, restore, delete and prune project snapshots",
     subcommands={
         "list": LIST_SPEC,
         "show": SHOW_SPEC,
+        "diff": SNAPSHOT_DIFF_SPEC,
         "restore": RESTORE_SPEC,
         "delete": DELETE_SPEC,
+        "prune": PRUNE_SPEC,
     },
     examples=(
         "davinci-axi snapshot list",
         "davinci-axi snapshot show 20261027-013000-sample-project",
+        "davinci-axi snapshot diff 20261108-230256-edit-20261108",
         "davinci-axi snapshot restore 20261027-013000-sample-project --force",
     ),
     reads_only=False,

@@ -14,6 +14,7 @@ from davinci_axi.commands.timeline_tracks import (
     MARKER_SPEC,
     TIMELINE_FLAG,
     TRACK_SPEC,
+    check_timecode_fields,
     context_words,
     count_items,
     finish,
@@ -83,6 +84,11 @@ def _present(session: Session, name: str) -> str | None:
     return name if session.find_timeline(name) is not None else None
 
 
+def _current_name(session: Session) -> str | None:
+    now = session.current_timeline()
+    return now.GetName() if now is not None else None
+
+
 def run_create(inv: Invocation) -> Result:
     check_snapshot_flags(inv)
     name = _name(inv)
@@ -123,7 +129,11 @@ def run_duplicate(inv: Invocation) -> Result:
     plan = MutationPlan(
         command="timeline duplicate",
         target=f"timeline {name}",
-        changes=[Change("duplicate", None, new), Change("source", name, name)],
+        changes=[
+            Change("duplicate", None, new),
+            Change("source", name, name),
+            Change("current", _current_name(session), new),
+        ],
         force_cmd=force_cmd(inv, "timeline", "duplicate", name, "--to", new, *context_words(inv)),
         next=timelines_hint(),
     )
@@ -137,7 +147,11 @@ def run_duplicate(inv: Invocation) -> Result:
         plan,
         "DuplicateTimeline",
         call,
-        lambda: {"duplicate": _present(session, new), "source": _present(session, name)},
+        lambda: {
+            "duplicate": _present(session, new),
+            "source": _present(session, name),
+            "current": _current_name(session),
+        },
     )
 
 
@@ -207,6 +221,7 @@ def run_open(inv: Invocation) -> Result:
         changes=[] if current_name == name else [Change("current", current_name, name)],
         force_cmd=force_cmd(inv, "timeline", "open", name, *context_words(inv)),
         snapshot="none",
+        extra={"note": "already the current timeline"} if current_name == name else {},
         next=timelines_hint(),
     )
     project = cast(ProjectEdit, session.require_project())
@@ -281,6 +296,7 @@ def run_timecode_set(inv: Invocation) -> Result:
     code = timecode_arg(inv)
     session = inv.connect()
     timeline = target_timeline(session, inv)
+    check_timecode_fields(code, timeline.GetSettings() or {})
     before = timeline.GetCurrentTimecode()
     plan = MutationPlan(
         command="timeline timecode set",
@@ -307,6 +323,7 @@ def run_timecode_start(inv: Invocation) -> Result:
     code = timecode_arg(inv)
     session = inv.connect()
     timeline = target_timeline(session, inv)
+    check_timecode_fields(code, timeline.GetSettings() or {})
     before = timeline.GetStartTimecode()
     plan = MutationPlan(
         command="timeline timecode start",
@@ -397,10 +414,14 @@ SUBCOMMANDS: dict[str, CommandSpec] = {
     ),
     "duplicate": CommandSpec(
         name="duplicate",
-        summary="Duplicate a timeline under a new name",
+        summary="Duplicate a timeline under a new name (the copy becomes current)",
         run=run_duplicate,
         positionals=(NAME_ARG,),
         flags=(TO_FLAG, *MUTATION_FLAGS),
+        notes=(
+            "--to <new name> is required: `timeline duplicate <name> <new>` is not accepted",
+            "The duplicate becomes the current timeline; `timeline open <new>` after it is a no-op",
+        ),
         examples=(
             'davinci-axi timeline duplicate "Edit v1" --to "Edit v1 backup"',
             'davinci-axi timeline duplicate "Edit v1" --to "Edit v1 backup" --force',

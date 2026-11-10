@@ -384,7 +384,7 @@ def _walk(path: tuple[str, ...], spec: CommandSpec) -> list[tuple[tuple[str, ...
 
 def test_every_help_exits_zero_with_examples(run_cli: Run) -> None:
     paths = _walk(("snapshot",), snapshot_cmd.SPEC)
-    assert len(paths) == 5
+    assert len(paths) == 7
     for path, _ in paths:
         code, out, err = run_cli([*path, "--help"])
         assert code == 0 and err == "" and "examples[" in out, path

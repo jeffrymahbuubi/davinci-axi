@@ -12,39 +12,54 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol, cast
+from typing import cast
 
 from davinci_axi.commands import color_extras, color_gallery, color_items
+from davinci_axi.commands.color_cdl_edl import CDL_EXT_SPEC
 from davinci_axi.commands.color_common import (
-    ColorGroupApi,
-    GraphApi,
     called_write,
     color_item,
     enum,
-    item_write,
     node_number,
     parent,
     resolve_many,
     verb,
 )
-from davinci_axi.commands.item_detail import resolve_item, str_arg
-from davinci_axi.commands.item_markers import ITEM_FLAGS, ITEM_ID, Target, open_target
+from davinci_axi.commands.color_graph import (
+    CACHE_MODES,
+    GRADE_INIT_SPEC,
+    GRAPH_READS,
+    GRAPH_SPEC,
+    LAYER,
+    layer_of,
+)
+from davinci_axi.commands.color_targets import (
+    CALLED_NOTE,
+    TARGET,
+    GraphTarget,
+    Step,
+    Targets,
+    called_step,
+    check_node_each,
+    field_for,
+    graph_of,
+    open_targets,
+    targets_write,
+)
+from davinci_axi.commands.item_markers import ITEM_FLAGS, ITEM_ID, open_target
 from davinci_axi.commands.items import TIMELINE_FLAG
-from davinci_axi.errors import AxiError, api_failed, not_found
+from davinci_axi.errors import AxiError, not_found
 from davinci_axi.mutate import Change
-from davinci_axi.output import collapse_home, empty_state
-from davinci_axi.session import Session
+from davinci_axi.output import collapse_home
 from davinci_axi.spec import CommandSpec, Flag, Invocation, Positional, Result
 
-LAYER = Flag("layer", "int", None, help="node-stack layer, counted from 1 (default: the first)")
 LAYER_FLAGS: tuple[Flag, ...] = (*ITEM_FLAGS, LAYER)
 NODE = Positional("node", help="node number, counted from 1 (`color graph` lists them)")
-CACHE_MODES = {
-    "auto": "CACHE_AUTO_ENABLED",
-    "enabled": "CACHE_ENABLED",
-    "disabled": "CACHE_DISABLED",
-}
 GRADE_MODES = {"none": 0, "source-tc": 1, "start-frames": 2}
+SHARED_READS = (
+    "Timeline.GetNodeGraph Project.GetColorGroupsList ColorGroup.GetName "
+    "ColorGroup.GetPreClipNodeGraph ColorGroup.GetPostClipNodeGraph"
+)
 COLOR_ORDER = (
     "cdl",
     "version",
@@ -56,138 +71,39 @@ COLOR_ORDER = (
     "album",
     "thumbnail",
 )
-GRAPH_READS = (
-    "TimelineItem.GetNodeGraph Graph.GetNumNodes Graph.GetNodeLabel Graph.GetToolsInNode "
-    "Graph.GetLUT Graph.GetNodeCacheMode Project.GetCurrentTimeline Project.SetCurrentTimeline"
-)
-
-
-class GraphOwner(Protocol):
-    def GetNodeGraph(self) -> GraphApi | None: ...
-
-
-def layer_of(inv: Invocation) -> int | None:
-    layer = inv.args.get("layer")
-    if layer is not None and (not isinstance(layer, int) or layer < 1):
-        raise AxiError(
-            "VALIDATION_ERROR",
-            "--layer must be 1 or more",
-            help=["Layers are numbered from 1; the project setting nodeStackLayers is the maximum"],
-        )
-    return layer if isinstance(layer, int) else None
 
 
 def layer_words(layer: int | None) -> list[str]:
     return [] if layer is None else ["--layer", str(layer)]
 
 
-def graph_of(target: Target, layer: int | None) -> GraphApi:
-    item = color_item(target)
-    graph = item.GetNodeGraph() if layer is None else item.GetNodeGraph(layer)
-    if graph is None:
-        where = f"{target.ref} layer {layer}" if layer else target.ref
-        raise not_found("node graph", where, "Check --layer against the setting nodeStackLayers")
-    return graph
-
-
-def check_node(graph: GraphApi, number: int) -> None:
-    count = graph.GetNumNodes()
-    if not 1 <= number <= count:
-        raise not_found("node", str(number), f"This graph has {count} nodes (numbered from 1)")
-
-
-def cache_names(session: Session) -> dict[int, str]:
-    """`{int(resolve.CACHE_*): "auto"|"enabled"|"disabled"}` for the constants this Resolve has."""
-    found: dict[int, str] = {}
-    for word, name in CACHE_MODES.items():
-        value = getattr(session.resolve, name, None)
-        if isinstance(value, (int, float)):
-            found[int(value)] = word
-    return found
-
-
-def node_rows(graph: GraphApi, names: dict[int, str]) -> list[dict[str, object]]:
-    return [
-        {
-            "index": i,
-            "label": graph.GetNodeLabel(i),
-            "tools": ", ".join(graph.GetToolsInNode(i) or []),
-            "lut": graph.GetLUT(i) or None,
-            "cache": names.get(graph.GetNodeCacheMode(i), graph.GetNodeCacheMode(i)),
-        }
-        for i in range(1, graph.GetNumNodes() + 1)
-    ]
-
-
-def _check_graph_flags(inv: Invocation) -> None:
-    item, group = str_arg(inv, "item"), str_arg(inv, "group")
-    tl_graph = bool(inv.args.get("timeline_graph"))
-    pre, post = bool(inv.args.get("pre")), bool(inv.args.get("post"))
-    problem = ""
-    if sum(map(bool, (item, tl_graph, group))) != 1:
-        problem = "pass exactly one of --item, --timeline-graph and --group"
-    elif group and pre == post:
-        problem = "--group needs exactly one of --pre and --post"
-    elif not group and (pre or post):
-        problem = "--pre and --post only apply to --group"
-    elif inv.args.get("layer") is not None and not item:
-        problem = "--layer only applies to --item"
-    if problem:
-        raise AxiError(
-            "VALIDATION_ERROR", problem, help=["Valid example: davinci-axi color graph --item V1:1"]
-        )
-
-
-def run_graph(inv: Invocation) -> Result:
-    _check_graph_flags(inv)
-    layer = layer_of(inv)
-    session = inv.connect()
-    group_name, ref = str_arg(inv, "group"), str_arg(inv, "item")
-    graph: GraphApi | None
-    if ref:
-        timeline = session.require_timeline(str_arg(inv, "timeline"))
-        target = Target(session, timeline, resolve_item(timeline, ref), ref)
-        graph, label = graph_of(target, layer), target.label
-    elif group_name:
-        groups = cast(list[ColorGroupApi], session.require_project().GetColorGroupsList())
-        found = next((g for g in groups if g.GetName() == group_name), None)
-        if found is None:
-            names = ", ".join(g.GetName() for g in groups) or "(none)"
-            raise not_found("color group", group_name, f"Color groups in this project: {names}")
-        side = "pre" if inv.args.get("pre") else "post"
-        graph = found.GetPreClipNodeGraph() if side == "pre" else found.GetPostClipNodeGraph()
-        label = f"color group {group_name} ({side}-clip)"
-    else:
-        timeline = session.require_timeline(str_arg(inv, "timeline"))
-        graph = cast(GraphOwner, timeline).GetNodeGraph()
-        label = f"timeline {timeline.GetName()}"
-    if graph is None:
-        raise api_failed("GetNodeGraph", f"{label} has no node graph")
-    rows = node_rows(graph, cache_names(session))
-    nodes = rows or empty_state("nodes", "in this graph", {})
-    return Result({"graph": label, "count": len(rows), "nodes": nodes})
-
-
-def _node_target(inv: Invocation) -> tuple[Target, GraphApi, int, int | None]:
+def _node_target(inv: Invocation) -> tuple[Targets, int, int | None]:
     number = node_number(inv.positionals["node"])
     layer = layer_of(inv)
-    target = open_target(inv)
-    graph = graph_of(target, layer)
-    check_node(graph, number)
-    return target, graph, number, layer
+    targets = open_targets(inv, graphs=True, layer=layer)
+    check_node_each(targets, number)
+    return targets, number, layer
 
 
 def _run_enabled(inv: Invocation, enabled: bool) -> Result:
-    target, graph, number, layer = _node_target(inv)
+    targets, number, layer = _node_target(inv)
     word = "enable" if enabled else "disable"
-    return called_write(
+
+    def step(e: GraphTarget) -> Step:
+        return called_step(targets, e, lambda: e.graph.SetNodeEnabled(number, enabled))
+
+    return targets_write(
         inv,
-        target,
+        targets,
         command=f"color node {word}",
-        words=["color", "node", word, target.ref, str(number), *layer_words(layer)],
-        call=lambda: graph.SetNodeEnabled(number, enabled),
+        words=["color", "node", word, inv.positionals["target"], str(number), *layer_words(layer)],
+        step=step,
         fail="Graph.SetNodeEnabled",
-        extra={"node": number, "label": graph.GetNodeLabel(number)},
+        extra={
+            "read_back": CALLED_NOTE,
+            "node": number,
+            "label": targets.entries[0].graph.GetNodeLabel(number),
+        },
     )
 
 
@@ -207,17 +123,32 @@ def run_node_cache(inv: Invocation) -> Result:
             f"unknown cache mode {mode}",
             help=[f"Valid modes: {', '.join(CACHE_MODES)}"],
         )
-    target, graph, number, layer = _node_target(inv)
-    value = enum(target.session, CACHE_MODES[mode])
-    before, after = graph.GetNodeCacheMode(number), int(cast(float, value))
-    return item_write(
+    targets, number, layer = _node_target(inv)
+    value = enum(targets.session, CACHE_MODES[mode])
+    after = int(cast(float, value))
+
+    def step(e: GraphTarget) -> Step:
+        name, before = field_for(targets, "cache", e), e.graph.GetNodeCacheMode(number)
+        return (
+            [Change(name, before, after)] if before != after else [],
+            lambda: e.graph.SetNodeCacheMode(number, value),
+            lambda: {name: e.graph.GetNodeCacheMode(number)},
+        )
+
+    return targets_write(
         inv,
-        target,
+        targets,
         command="color node cache",
-        words=["color", "node", "cache", target.ref, str(number), mode, *layer_words(layer)],
-        changes=[Change("cache", before, after)] if before != after else [],
-        call=lambda: graph.SetNodeCacheMode(number, value),
-        read=lambda: {"cache": graph.GetNodeCacheMode(number)},
+        words=[
+            "color",
+            "node",
+            "cache",
+            inv.positionals["target"],
+            str(number),
+            mode,
+            *layer_words(layer),
+        ],
+        step=step,
         fail="Graph.SetNodeCacheMode",
         extra={"node": number, "mode": mode},
     )
@@ -228,32 +159,64 @@ def run_lut_set(inv: Invocation) -> Result:
     path = Path(path_text).expanduser().resolve()
     if not path.is_file():
         raise not_found("file", collapse_home(path), "Check the path of the LUT file")
-    target, graph, number, layer = _node_target(inv)
-    before, after = graph.GetLUT(number) or "", str(path)
+    targets, number, layer = _node_target(inv)
+    after = str(path)
+    warning = color_extras.lut_path_warning(path)
 
-    def read() -> dict[str, object]:
-        now = graph.GetLUT(number) or ""
-        # Resolve reports the LUT relative to its LUT folder, so compare file names.
-        return {"lut": after if now and Path(now).name == path.name else now}
+    def step(e: GraphTarget) -> Step:
+        name, before = field_for(targets, "lut", e), e.graph.GetLUT(number) or ""
 
-    words = ["color", "node", "lut", "set", target.ref, str(number), path_text]
-    return item_write(
-        inv,
-        target,
-        command="color node lut set",
-        words=[*words, *layer_words(layer)],
-        changes=[Change("lut", before, after)] if before != after else [],
-        call=lambda: graph.SetLUT(number, after),
-        read=read,
-        fail="Graph.SetLUT",
-        extra={"node": number},
-    )
+        def read() -> dict[str, object]:
+            now = e.graph.GetLUT(number) or ""
+            # Resolve reports the LUT relative to its LUT folder, so compare file names.
+            return {name: after if now and Path(now).name == path.name else now}
+
+        return (
+            [Change(name, before, after)] if before != after else [],
+            lambda: e.graph.SetLUT(number, after),
+            read,
+        )
+
+    words = ["color", "node", "lut", "set", inv.positionals["target"], str(number), path_text]
+    try:
+        return targets_write(
+            inv,
+            targets,
+            command="color node lut set",
+            words=[*words, *layer_words(layer)],
+            step=step,
+            fail="Graph.SetLUT",
+            warning=warning,
+            extra={"node": number},
+        )
+    except AxiError as err:
+        if err.code == "API_FAILED":
+            err.help.insert(0, color_extras.INSTALL_HELP)
+        raise
 
 
 def run_lut_show(inv: Invocation) -> Result:
-    target, graph, number, _ = _node_target(inv)
-    label, lut = graph.GetNodeLabel(number), graph.GetLUT(number) or None
-    return Result({"item": target.label, "node": number, "label": label, "lut": lut})
+    targets, number, _ = _node_target(inv)
+    if len(targets.entries) == 1:
+        e = targets.entries[0]
+        key = "item" if targets.spec.kind == "items" else "target"
+        return Result(
+            {
+                key: e.label,
+                "node": number,
+                "label": e.graph.GetNodeLabel(number),
+                "lut": _lut(e, number),
+            }
+        )
+    rows = [
+        {"target": e.label, "label": e.graph.GetNodeLabel(number), "lut": _lut(e, number)}
+        for e in targets.entries
+    ]
+    return Result({"node": number, "luts": rows})
+
+
+def _lut(entry: GraphTarget, number: int) -> str | None:
+    return entry.graph.GetLUT(number) or None
 
 
 def run_apply_drx(inv: Invocation) -> Result:
@@ -262,35 +225,50 @@ def run_apply_drx(inv: Invocation) -> Result:
         raise not_found("file", collapse_home(path), "Check the path of the .drx file")
     mode, layer = str(inv.args.get("mode") or "none"), layer_of(inv)
     every = bool(inv.args.get("all_layers"))
-    target = open_target(inv)
-    graph = graph_of(target, layer)
-    words = ["color", "grade", "apply-drx", target.ref, inv.positionals["file"], "--mode", mode]
-    return called_write(
+    targets = open_targets(inv, graphs=True, layer=layer)
+
+    def step(e: GraphTarget) -> Step:
+        return called_step(
+            targets, e, lambda: e.graph.ApplyGradeFromDRX(str(path), GRADE_MODES[mode], every)
+        )
+
+    words = ["color", "grade", "apply-drx", inv.positionals["target"], inv.positionals["file"]]
+    return targets_write(
         inv,
-        target,
+        targets,
         command="color grade apply-drx",
-        words=[*words, *(["--all-layers"] if every else []), *layer_words(layer)],
-        call=lambda: graph.ApplyGradeFromDRX(str(path), GRADE_MODES[mode], every),
+        words=[*words, "--mode", mode, *(["--all-layers"] if every else []), *layer_words(layer)],
+        step=step,
         fail="Graph.ApplyGradeFromDRX",
-        warning="replaces the grade of the item with the one in the DRX file",
-        extra={"file": collapse_home(path), "mode": mode, "all_layers": every},
+        warning="replaces the grade of each target with the one in the DRX file",
+        extra={
+            "read_back": CALLED_NOTE,
+            "file": collapse_home(path),
+            "mode": mode,
+            "all_layers": every,
+        },
     )
 
 
 def run_grade_reset(inv: Invocation) -> Result:
     layer = layer_of(inv)
-    target = open_target(inv)
-    graph = graph_of(target, layer)
-    return called_write(
+    targets = open_targets(inv, graphs=True, layer=layer)
+    counts = [(e.ref, e.graph.GetNumNodes()) for e in targets.entries]
+    nodes: object = counts[0][1] if len(counts) == 1 else ", ".join(f"{r}: {n}" for r, n in counts)
+
+    def step(e: GraphTarget) -> Step:
+        return called_step(targets, e, e.graph.ResetAllGrades)
+
+    return targets_write(
         inv,
-        target,
+        targets,
         command="color grade reset",
-        words=["color", "grade", "reset", target.ref, *layer_words(layer)],
-        call=graph.ResetAllGrades,
+        words=["color", "grade", "reset", inv.positionals["target"], *layer_words(layer)],
+        step=step,
         fail="Graph.ResetAllGrades",
         irreversible=True,
-        warning="resets every grade of the item's graph; the snapshot is the only way back",
-        extra={"nodes": graph.GetNumNodes()},
+        warning="resets every grade of each target's graph; the snapshot is the only way back",
+        extra={"read_back": CALLED_NOTE, "nodes": nodes},
     )
 
 
@@ -333,9 +311,9 @@ def run_arri_cdl(inv: Invocation) -> Result:
 def _node_verb(
     name: str, summary: str, run: Callable[[Invocation], Result], write: str
 ) -> CommandSpec:
-    example = f"davinci-axi color node {name} V1:1 2"
-    methods = f"{GRAPH_READS} Graph.{write}"
-    return verb(name, summary, run, (ITEM_ID, NODE), LAYER_FLAGS, example, methods)
+    example = f"davinci-axi color node {name} V1:1 2|davinci-axi color node {name} timeline 1"
+    methods = f"{GRAPH_READS} {SHARED_READS} Graph.{write}"
+    return verb(name, summary, run, (TARGET, NODE), LAYER_FLAGS, example, methods)
 
 
 NODE_LUT_SPEC = parent(
@@ -344,21 +322,29 @@ NODE_LUT_SPEC = parent(
     {
         "set": verb(
             "set",
-            "Apply a LUT file to one node of an item",
+            "Apply a LUT file to one node of an item, item list or shared graph",
             run_lut_set,
-            (ITEM_ID, NODE, Positional("path", help="LUT file (.cube, .3dl, ...)")),
+            (TARGET, NODE, Positional("path", help="LUT file (.cube, .3dl, ...)")),
             LAYER_FLAGS,
-            "davinci-axi color node lut set V1:1 1 ~/luts/film.cube",
-            f"{GRAPH_READS} Graph.SetLUT",
+            "davinci-axi color node lut set V1:1 1 ~/luts/film.cube"
+            "|davinci-axi color node lut set timeline 1 ~/luts/film.cube"
+            "|davinci-axi color node lut set V1:1,V1:3 1 ~/luts/film.cube",
+            f"{GRAPH_READS} {SHARED_READS} Graph.SetLUT",
+            notes=(
+                "Resolve only accepts LUTs it has discovered in its LUT folders (master folder or "
+                "Preferences > System > General custom paths); the dry run warns about other paths",
+                "A new timeline or group graph has 0 nodes until one is added in the Color page "
+                "once (no API adds it on 21.1.1, F29); the item-list form `V1:1,V1:3` works now",
+            ),
         ),
         "show": verb(
             "show",
-            "Show the LUT of one node of an item (read-only)",
+            "Show the LUT of one node of an item, item list or shared graph (read-only)",
             run_lut_show,
-            (ITEM_ID, NODE),
+            (TARGET, NODE),
             (TIMELINE_FLAG, LAYER),
-            "davinci-axi color node lut show V1:1 1",
-            GRAPH_READS,
+            "davinci-axi color node lut show V1:1 1|davinci-axi color node lut show timeline 1",
+            f"{GRAPH_READS} {SHARED_READS}",
             read=True,
         ),
     },
@@ -368,46 +354,68 @@ NODE_SPEC = parent(
     "node",
     "Enable, disable, cache or set the LUT of a node",
     {
-        "enable": _node_verb("enable", "Enable a node", run_node_enable, "SetNodeEnabled"),
-        "disable": _node_verb("disable", "Disable a node", run_node_disable, "SetNodeEnabled"),
+        "enable": _node_verb(
+            "enable",
+            "Enable a node of an item, item list or shared graph",
+            run_node_enable,
+            "SetNodeEnabled",
+        ),
+        "disable": _node_verb(
+            "disable",
+            "Disable a node of an item, item list or shared graph",
+            run_node_disable,
+            "SetNodeEnabled",
+        ),
         "cache": verb(
             "cache",
-            "Set the cache mode of a node: auto, enabled or disabled",
+            "Set the cache mode of a node of an item, item list or shared graph: "
+            "auto, enabled or disabled",
             run_node_cache,
-            (ITEM_ID, NODE, Positional("mode", help="auto, enabled or disabled")),
+            (TARGET, NODE, Positional("mode", help="auto, enabled or disabled")),
             LAYER_FLAGS,
-            "davinci-axi color node cache V1:1 2 enabled",
-            f"{GRAPH_READS} Graph.SetNodeCacheMode",
+            "davinci-axi color node cache V1:1 2 enabled"
+            "|davinci-axi color node cache group:Hero:pre 1 enabled",
+            f"{GRAPH_READS} {SHARED_READS} Graph.SetNodeCacheMode",
         ),
         "lut": NODE_LUT_SPEC,
     },
     "davinci-axi color node cache V1:1 2 enabled|davinci-axi color node lut show V1:1 1",
+    (
+        "No API to add a node (AddNode does not exist) or to attach OFX/ResolveFX to one; "
+        "build the node tree in the Color page, then address nodes by number here.",
+        "Read a node tree back with `color graph --item V1:1`.",
+        "A new timeline or group graph has 0 nodes until one is added in the Color page once "
+        "(no API adds it on 21.1.1, F29); the item-list form `V1:1,V1:3` works right away.",
+    ),
 )
 GRADE_SPEC = parent(
     "grade",
     "Apply a DRX grade, reset, copy or apply the ARRI CDL of an item",
     {
+        "init": GRADE_INIT_SPEC,
         "apply-drx": verb(
             "apply-drx",
-            "Apply the grade of a .drx still file to an item",
+            "Apply the grade of a .drx still file to an item, item list or shared graph",
             run_apply_drx,
-            (ITEM_ID, Positional("file", help="the .drx file")),
+            (TARGET, Positional("file", help="the .drx file")),
             (
                 *LAYER_FLAGS,
                 Flag("mode", "str", "none", choices=tuple(GRADE_MODES), help="keyframe alignment"),
                 Flag("all-layers", "bool", False, help="apply to every node-stack layer"),
             ),
-            "davinci-axi color grade apply-drx V1:1 ~/grades/look.drx",
-            f"{GRAPH_READS} Graph.ApplyGradeFromDRX",
+            "davinci-axi color grade apply-drx V1:1 ~/grades/look.drx"
+            "|davinci-axi color grade apply-drx group:Hero:post ~/grades/look.drx",
+            f"{GRAPH_READS} {SHARED_READS} Graph.ApplyGradeFromDRX",
         ),
         "reset": verb(
             "reset",
-            "Reset every grade of an item (irreversible except through a snapshot)",
+            "Reset every grade of an item, item list or shared graph "
+            "(irreversible except through a snapshot)",
             run_grade_reset,
-            (ITEM_ID,),
+            (TARGET,),
             LAYER_FLAGS,
-            "davinci-axi color grade reset V1:1",
-            f"{GRAPH_READS} Graph.ResetAllGrades",
+            "davinci-axi color grade reset V1:1|davinci-axi color grade reset timeline",
+            f"{GRAPH_READS} {SHARED_READS} Graph.ResetAllGrades",
         ),
         "copy": verb(
             "copy",
@@ -429,29 +437,14 @@ GRADE_SPEC = parent(
         ),
     },
     "davinci-axi color grade copy V1:1 V1:2 --force|davinci-axi color grade reset V1:1",
-)
-GRAPH_SPEC = verb(
-    "graph",
-    "Show the nodes of an item, the timeline or a colour group graph (read-only)",
-    run_graph,
-    (),
     (
-        TIMELINE_FLAG,
-        Flag("item", "str", None, help="item id or <V|A|S><track>:<index> such as V1:1"),
-        Flag("timeline-graph", "bool", False, help="the timeline's own node graph"),
-        Flag("group", "str", None, help="a colour group name (with --pre or --post)"),
-        Flag("pre", "bool", False, help="the group's pre-clip graph"),
-        Flag("post", "bool", False, help="the group's post-clip graph"),
-        LAYER,
+        "A .drx made from a hand-built grade (including OFX) is the scripted route to "
+        "effects the API cannot add.",
     ),
-    "davinci-axi color graph --item V1:1|davinci-axi color graph --item V1:1 --layer 2"
-    "|davinci-axi color graph --group Hero --pre|davinci-axi color graph --timeline-graph",
-    f"{GRAPH_READS} Timeline.GetNodeGraph Project.GetColorGroupsList "
-    "ColorGroup.GetName ColorGroup.GetPreClipNodeGraph ColorGroup.GetPostClipNodeGraph",
-    read=True,
 )
 
 _PARTS = {**color_items.SUBCOMMANDS, **color_gallery.SUBCOMMANDS, **color_extras.SUBCOMMANDS}
+_PARTS["cdl"] = CDL_EXT_SPEC
 SUBCOMMANDS: dict[str, CommandSpec] = {
     "graph": GRAPH_SPEC,
     "node": NODE_SPEC,
@@ -464,4 +457,11 @@ SPEC = parent(
     SUBCOMMANDS,
     "davinci-axi color graph --item V1:1|davinci-axi color version add V1:1 alt --force"
     "|davinci-axi color still grab --force",
+    (
+        "Resolve's scripting API cannot add OFX/ResolveFX to a node or add nodes: put a look "
+        "on an existing node with `color node lut set` (.cube or .dctl) or apply a saved grade "
+        "with `color grade apply-drx`.",
+        "Shared looks: target `timeline` or group:<name>:pre|post, or a comma-separated item "
+        "list, with one snapshot.",
+    ),
 )

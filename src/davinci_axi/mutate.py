@@ -21,11 +21,16 @@ from davinci_axi.output import collapse_home, hint
 from davinci_axi.resolve_types import TimelineApi
 from davinci_axi.resolve_types_edit import ProjectEdit, ProjectManagerEdit, ResolveEdit
 from davinci_axi.session import Session
-from davinci_axi.snapshot import take_snapshot
+from davinci_axi.snapshot import resolve_out, take_snapshot
 from davinci_axi.spec import Flag, Invocation, Result
 
 ALLOW_ENV = "DAVINCI_AXI_ALLOW_UNSNAPSHOTTED"
 EPSILON = 1e-6
+DELIVER_PAGE = "deliver"
+PAGE_LEFT_NOTE = (
+    "Resolve reports no page while a render runs, so the page cannot be put back; once "
+    "`render status` shows Complete run `page set <page> --force`, or use --wait"
+)
 
 MUTATION_FLAGS: tuple[Flag, ...] = (
     Flag("force", "bool", False, help="apply the change (without it the command is a dry run)"),
@@ -239,7 +244,7 @@ def _safety_step(inv: Invocation, session: Session | None, plan: MutationPlan) -
             ],
         )
     out_text = inv.args.get("snapshot_out")
-    out = Path(out_text).expanduser() if isinstance(out_text, str) and out_text else None
+    out = resolve_out(out_text) if isinstance(out_text, str) and out_text else None
     snapshot = take_snapshot(session, reason=plan.command, out=out)
     return _Taken(snapshot.id, snapshot.dir, custom_out=out is not None)
 
@@ -355,6 +360,36 @@ def with_page(session: Session, page: str) -> Iterator[bool]:
     finally:
         if current:
             app.OpenPage(current)
+
+
+def _restore_page(app: ResolveEdit, previous: str, state: dict[str, object]) -> None:
+    now = app.GetCurrentPage()
+    if not previous or now == previous:
+        return
+    if not now:  # Resolve reports no page while a render runs (F45c live); OpenPage is refused
+        state["page_restored"] = False
+        if previous != DELIVER_PAGE:
+            state["page_before"] = previous
+        return
+    state["page_restored"] = bool(app.OpenPage(previous))
+
+
+@contextmanager
+def keep_page(session: Session) -> Iterator[dict[str, object]]:
+    """Put the page that was open before the block back after it.
+
+    The dict gets `page_restored: bool` only when Resolve had moved (`AddRenderJob` opens
+    Deliver); a refused `OpenPage` is reported as False, never raised. A page that reads empty
+    (a render is running) is reported as not restored with `page_before`, and no `OpenPage` is
+    attempted.
+    """
+    app = cast(ResolveEdit, session.resolve)
+    previous = app.GetCurrentPage()
+    state: dict[str, object] = {}
+    try:
+        yield state
+    finally:
+        _restore_page(app, previous, state)
 
 
 @contextmanager

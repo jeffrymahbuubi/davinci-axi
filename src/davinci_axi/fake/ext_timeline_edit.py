@@ -56,6 +56,10 @@ def _set_current_timecode(self: FakeTimeline, timecode: str) -> bool:
         return bool(value)
     if not _TIMECODE.match(timecode):
         return False
+    if self._world.resolve.page == "deliver":
+        self.__dict__.setdefault("viewer_tc", self.current_tc)  # the viewer stays stale (F30)
+    else:
+        self.__dict__["viewer_tc"] = timecode
     self.current_tc = timecode
     return True
 
@@ -242,6 +246,7 @@ def _duplicate_timeline(self: FakeTimeline, timelineName: str) -> FakeTimeline |
         return None
     clone = _clone_timeline(self, timelineName)
     project.timelines.append(clone)
+    project.current_timeline = clone
     return clone
 
 

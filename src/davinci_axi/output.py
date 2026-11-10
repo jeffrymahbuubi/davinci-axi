@@ -76,6 +76,14 @@ def apply_limit(rows: list[T], limit: int) -> tuple[list[T], int]:
     return rows[:limit], len(rows)
 
 
+def page_meta(shown: int, total: int) -> dict[str, object]:
+    """`total` for a paged list, plus `truncated: true` when a limit cut it short."""
+    meta: dict[str, object] = {"total": total}
+    if shown < total:
+        meta["truncated"] = True
+    return meta
+
+
 def empty_state(noun: str, scope: str, filters: dict[str, object]) -> str:
     """`0 <noun> <scope>` plus any active filters, e.g. `0 items on audio tracks in timeline X`."""
     text = f"0 {noun} {scope}"

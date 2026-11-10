@@ -80,6 +80,7 @@ def test_snapshot_reason_is_stored(
     assert parse_toon_keys(out)["reason"] == "before regrade"
     meta = json.loads((_only_snapshot_dir(tmp_path) / "meta.json").read_text(encoding="utf-8"))
     assert meta["reason"] == "before regrade"
+    assert meta["manual"] is True  # F34(g): prune keeps it unless --all
 
 
 def test_only_export_project_is_written_and_page_unchanged(
@@ -89,6 +90,28 @@ def test_only_export_project_is_written_and_page_unchanged(
     assert code == 0
     assert fake_world.write_calls() == ["ProjectManager.ExportProject"]
     assert fake_world.page_changes() == []
+
+
+def test_snapshot_force_is_accepted_and_ignored(
+    run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld, tmp_path: Path
+) -> None:
+    code, out, err = run_cli(["project", "snapshot", "--force"])
+    keys = parse_toon_keys(out)
+    assert (code, err) == (0, "")
+    assert keys["force"].startswith("ignored")
+    assert (_only_snapshot_dir(tmp_path) / "project.drp").exists()
+    assert len(_exports(fake_world)) == 1
+
+
+def test_snapshot_without_force_has_no_force_key(run_cli: Run, parse_toon_keys: Keys) -> None:
+    _, out, _ = run_cli(["project", "snapshot"])
+    assert "force" not in parse_toon_keys(out)
+
+
+def test_snapshot_help_mentions_disk_only(run_cli: Run) -> None:
+    code, out, _ = run_cli(["project", "snapshot", "--help"])
+    assert code == 0
+    assert "disk-only" in out
 
 
 def test_snapshot_includes_stills_and_luts_by_default(run_cli: Run, fake_world: FakeWorld) -> None:

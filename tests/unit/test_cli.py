@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -34,7 +35,10 @@ def _install(monkeypatch: pytest.MonkeyPatch, specs: dict[str, CommandSpec]) -> 
 def test_version_prints_bare_version(run_cli: Run) -> None:
     for flag in ("--version", "-V", "-v"):
         code, out, err = run_cli([flag])
-        assert (code, out, err) == (0, f"{__version__}\n", "")
+        assert code == 0 and err == ""
+        assert out.startswith(__version__)
+        pattern = re.escape(__version__) + r"(\+[0-9a-f]{7,40}(\.dirty)?( \([^)\n]*\))?)?\n"
+        assert re.fullmatch(pattern, out)
 
 
 def test_version_fast_path_imports_nothing_heavy() -> None:

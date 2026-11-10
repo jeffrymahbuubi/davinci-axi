@@ -9,15 +9,17 @@ Every comp-level mutation goes through `comp_mutation`: it checks the target (`-
 
 from __future__ import annotations
 
+import functools
 import re
 import shlex
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
 
 from davinci_axi.commands.item_detail import Located, resolve_item, str_arg
-from davinci_axi.errors import AxiError, not_found
+from davinci_axi.commands.render_frame import frame_to_timecode
+from davinci_axi.errors import AxiError, api_failed, not_found
 from davinci_axi.fusion_guard import (
     FUSION_FLAGS,
     UNDO_PREFIX,
@@ -25,16 +27,18 @@ from davinci_axi.fusion_guard import (
     Preflight,
     TimelineItemFusion,
     attrs_of,
+    comp_name_of,
     comp_snapshot_hint,
     export_comp,
+    fusion_app,
     fusion_call,
     lua_values,
     preflight,
     resolve_comp,
-    tool_name,
     undo_group,
     validate_target,
 )
+from davinci_axi.fusion_guard import source_label as source_label  # re-export (F16)
 from davinci_axi.mutate import (
     MUTATION_FLAGS,
     Change,
@@ -46,10 +50,20 @@ from davinci_axi.mutate import (
 )
 from davinci_axi.output import collapse_home, hint
 from davinci_axi.resolve_types import TimelineApi, TimelineItemApi
+from davinci_axi.resolve_types_edit import ResolveEdit, TimelineEdit
 from davinci_axi.session import Session
 from davinci_axi.spec import CommandSpec, Flag, Invocation, Positional, Result
 
-MUT_FLAGS: tuple[Flag, ...] = (*FUSION_FLAGS, *MUTATION_FLAGS)
+VIA_PAGE = Flag(
+    "via-page",
+    "bool",
+    False,
+    help=(
+        "edit the comp through the Fusion page (playhead to the item, open the page, use the comp "
+        "it shows, restore the page), as the UI does; the dry run does not switch pages"
+    ),
+)
+MUT_FLAGS: tuple[Flag, ...] = (*FUSION_FLAGS, VIA_PAGE, *MUTATION_FLAGS)
 ITEM_FLAGS: tuple[Flag, ...] = (
     *(f for f in FUSION_FLAGS if f.name in ("item", "timeline", "active")),
     *MUTATION_FLAGS,
@@ -69,20 +83,102 @@ class Edit:
     session: Session
     pre: Preflight
     ref: CompRef
+    via_page: bool = False
+    previous_page: str | None = None
+    switched: bool = False
+    page_restored: bool = False
+    playhead_moved: bool = False
+
+
+_PENDING: list[Edit] = []  # edits that left Resolve on the Fusion page; `mut_spec` restores them
+
+
+def restore_page(edit: Edit) -> None:
+    """Return Resolve to the page it was on before `--via-page`; at most once per edit."""
+    if not edit.switched or edit.page_restored:
+        return
+    if edit.previous_page:
+        app = cast(ResolveEdit, edit.session.resolve)
+        edit.page_restored = bool(app.OpenPage(edit.previous_page))
+    if edit in _PENDING:
+        _PENDING.remove(edit)
+
+
+def _restore_pending() -> None:
+    for edit in list(_PENDING):
+        restore_page(edit)
+    _PENDING.clear()
+
+
+def _enter_page(edit: Edit, *, force: bool) -> None:
+    """Playhead to the item, Fusion page open, `edit.ref.comp` = the comp that page shows (D3).
+
+    The checks run in the dry run too; the playhead and page only move with `--force`.
+    """
+    ref = edit.ref
+    if ref.item is None:
+        return
+    timeline = cast(TimelineEdit, ref.timeline or edit.session.require_timeline(None))
+    if ";" in timeline.GetStartTimecode():
+        raise AxiError(
+            "VALIDATION_ERROR",
+            "--via-page cannot place the playhead on a drop-frame timeline",
+            help=[
+                "Use `timeline timecode set` to move the playhead, then edit with --active reads"
+            ],
+        )
+    fps = float((timeline.GetSettings() or {}).get("timelineFrameRate") or 0)
+    code = frame_to_timecode(int(ref.item.item.GetStart()), fps)
+    if not force:
+        return
+    if timeline.GetCurrentTimecode() != code:
+        if not timeline.SetCurrentTimecode(code):
+            raise api_failed("SetCurrentTimecode", f"could not move the playhead to {code}")
+        edit.playhead_moved = True
+    app = cast(ResolveEdit, edit.session.resolve)
+    current = app.GetCurrentPage()
+    if current != "fusion":
+        if not app.OpenPage("fusion"):
+            raise api_failed("OpenPage", "could not switch to the fusion page")
+        edit.previous_page, edit.switched = current, True
+        _PENDING.append(edit)
+    try:
+        item = cast(ItemFusionEdit, ref.item.item)
+        if ref.comp_index > 1:
+            fusion_call("LoadFusionCompByName", item.LoadFusionCompByName, ref.comp_name)
+        comp = fusion_call("GetCurrentComp", fusion_app(edit.session).GetCurrentComp)
+        found = comp_name_of(comp) if comp is not None else "no comp"
+        if comp is None or found != ref.comp_name:
+            raise api_failed(
+                "GetCurrentComp", f"the Fusion page shows {found}, not {ref.comp_name}"
+            )
+    except AxiError:
+        restore_page(edit)
+        raise
+    edit.ref = replace(ref, comp=comp)
 
 
 def open_comp(inv: Invocation) -> Edit:
-    """Validate the target flags, connect, preflight and load the comp (`--item` only)."""
+    """Validate the target flags, connect, preflight and load the comp (`--item` only).
+
+    With `--via-page` and `--force` the comp is the one the Fusion page shows (D3).
+    """
     check_snapshot_flags(inv)
     validate_target(inv, mutating=True)
     session = inv.connect()
     pre = preflight(session, inv)
-    return Edit(session, pre, resolve_comp(session, inv, mutating=True))
+    edit = Edit(session, pre, resolve_comp(session, inv, mutating=True))
+    edit.via_page = bool(inv.args.get("via_page"))
+    if edit.via_page:
+        _enter_page(edit, force=bool(inv.args.get("force")))
+    return edit
 
 
 def target_words(inv: Invocation, ref: CompRef) -> list[str]:
     """The flags that address `ref` again, for the `--force` line."""
     words = ["--item", ref.item_ref]
+    if inv.args.get("via_page"):
+        words.append("--via-page")
     if ref.comp_index > 1:
         words += ["--comp", ref.comp_name]
     timeline = str_arg(inv, "timeline")
@@ -114,8 +210,12 @@ def comp_mutation(
     irreversible: bool = False,
     warning: str = "",
     next_lines: list[str] | None = None,
+    extra: dict[str, object] | None = None,
 ) -> Result:
-    """`run_mutation` for a comp edit: export the comp, then `body(plan)` in one undo event."""
+    """`run_mutation` for a comp edit: export the comp, then `body(plan)` in one undo event.
+
+    With `--via-page` the page is restored when the edit ends, whichever way it ends.
+    """
     ref = edit.ref
     plan = MutationPlan(
         command=command,
@@ -124,12 +224,16 @@ def comp_mutation(
         force_cmd=force_cmd(inv, *words, *target_words(inv, ref)),
         irreversible=irreversible,
         warning=warning,
-        extra=head_extra(edit.pre, ref.item_ref, ref.comp_name),
+        extra={**head_extra(edit.pre, ref.item_ref, ref.comp_name), **(extra or {})},
         next=list(next_lines or []),
     )
+    if edit.via_page:
+        plan.extra["via_page"] = True
+    exported: list[Path] = []
 
     def apply() -> None:
         path = export_comp(ref, command)
+        exported.append(path)
         plan.extra["comp_snapshot"] = collapse_home(path)
         plan.next.append(restore_hint(path, ref.item_ref))
         try:
@@ -143,7 +247,22 @@ def comp_mutation(
             err.help.append(restore_hint(path, ref.item_ref))
             raise
 
-    return run_mutation(inv, edit.session, plan, apply, verify)
+    try:
+        result = run_mutation(inv, edit.session, plan, apply, verify)
+    except AxiError as err:
+        if exported and "comp_snapshot" not in err.detail:  # a VERIFY_FAILED after the apply
+            err.detail["comp_snapshot"] = collapse_home(exported[0])
+            err.help.append(restore_hint(exported[0], ref.item_ref))
+        raise
+    finally:
+        restore_page(edit)
+    if edit.switched:
+        result.data["page_restored"] = edit.page_restored
+        if not edit.page_restored:
+            result.help.append(f"Open the {edit.previous_page} page again: Resolve did not switch")
+    if edit.playhead_moved:
+        result.data["playhead_moved"] = True
+    return result
 
 
 def restore_hint(path: Path, item_ref: str) -> str:
@@ -196,15 +315,6 @@ def find_input(tool: Any, tool_label: str, input_id: str) -> Any:
     raise not_found("input", f"{input_id} on tool {tool_label}", f"Inputs on this tool: {shown}")
 
 
-def source_label(port: Any) -> str | None:
-    """`Tool.Output` feeding `port`, or None when it is unconnected."""
-    source = fusion_call("GetConnectedOutput", port.GetConnectedOutput)
-    if source is None:
-        return None
-    owner = fusion_call("GetTool", source.GetTool)
-    return f"{tool_name(owner)}.{attrs_of(source).get('OUTS_ID')}"
-
-
 def find_output(tool: Any, tool_label: str, output_id: str | None) -> Any:
     outputs = lua_values(fusion_call("GetOutputList", tool.GetOutputList))
     ids = [str(attrs_of(o).get("OUTS_ID")) for o in outputs]
@@ -226,7 +336,14 @@ def split_port(text: str) -> tuple[str, str | None]:
 def mut_spec(
     name: str, summary: str, run: Callable[[Invocation], Result], **kw: Any
 ) -> CommandSpec:
-    return CommandSpec(name=name, summary=summary, run=run, reads_only=False, **kw)
+    @functools.wraps(run)
+    def guarded(inv: Invocation) -> Result:
+        try:
+            return run(inv)
+        finally:  # an error between `open_comp` and `comp_mutation` must not strand the page
+            _restore_pending()
+
+    return CommandSpec(name=name, summary=summary, run=guarded, reads_only=False, **kw)
 
 
 ITEM_EXAMPLE = "--item V1:2"

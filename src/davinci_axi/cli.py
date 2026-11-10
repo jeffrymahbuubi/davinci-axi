@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -20,7 +20,7 @@ BIN = "davinci-axi"
 DESCRIPTION = "Agent-ergonomic CLI for DaVinci Resolve Studio"
 VERSION_FLAGS = ("-v", "-V", "--version")
 HELP_FLAGS = ("--help", "-h")
-TOP_EXAMPLES = [f"{BIN}", f"{BIN} --json", f"{BIN} --help"]
+TOP_EXAMPLES = [f"{BIN}", f"{BIN} --json", f"{BIN} --help", f"{BIN} help loudness"]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,9 +28,9 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     _configure_streams()
     if any(a in VERSION_FLAGS for a in _before_separator(args)):
-        from davinci_axi import __version__
+        from davinci_axi.version import describe
 
-        sys.stdout.write(__version__ + "\n")
+        sys.stdout.write(describe() + "\n")
         return 0
     return _run(args)
 
@@ -187,6 +187,7 @@ def _dispatch(args: list[str]) -> int:
             ],
         )
     parsed, positionals = flags.parse(spec, tail, command)
+    notes = cast("list[str]", parsed.pop("_renamed", []))
     inv = Invocation(
         opts=opts,
         args=parsed,
@@ -195,6 +196,10 @@ def _dispatch(args: list[str]) -> int:
         bin_name=BIN,
     )
     result = spec.run(inv)
+    if notes:
+        from dataclasses import replace
+
+        result = replace(result, help=[*result.help, *notes])
     _write(render(result.data, result.help, opts.json))
     return result.exit_code
 

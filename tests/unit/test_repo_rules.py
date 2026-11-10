@@ -4,11 +4,12 @@ import ast
 import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from davinci_axi import registry
-from davinci_axi.spec import CommandSpec
+from davinci_axi import helptext, registry
+from davinci_axi.spec import GLOBAL_FLAGS, CommandSpec, Flag
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "davinci_axi"
@@ -87,6 +88,99 @@ def test_no_source_file_imports_the_resolve_module_statically() -> None:
 def test_runtime_has_no_third_party_dependencies() -> None:
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert re.search(r"^dependencies = \[\]$", text, re.MULTILINE)
+
+
+def _error_calls() -> Iterator[tuple[str, int, ast.Call]]:
+    """Every `AxiError("CODE", ...)` call outside the fake, as (file, line, call)."""
+    for path in sorted(SRC.rglob("*.py")):
+        if "fake" in path.relative_to(SRC).parts:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name == "AxiError" and isinstance(node.args[0], ast.Constant):
+                yield str(path.relative_to(ROOT)), node.lineno, node
+
+
+def test_every_inline_error_carries_help() -> None:
+    missing = [
+        f"{file}:{line}"
+        for file, line, call in _error_calls()
+        if len(call.args) < 3 and not any(kw.arg == "help" for kw in call.keywords)
+    ]
+    assert missing == [], "AxiError with no help= (name a valid value, the fix or what to check)"
+
+
+def _specs() -> Iterator[tuple[str, CommandSpec]]:
+    """Every runnable command and subcommand of the registry tree, as (path, spec)."""
+    for name in registry.command_names():
+        spec = registry.lookup(name)
+        assert spec is not None, name
+        stack = [(name, spec)]
+        while stack:
+            path, one = stack.pop()
+            if one.run is not None:
+                yield path, one
+            stack.extend((f"{path} {n}", child) for n, child in one.subcommands.items())
+
+
+KIND_EXCEPTIONS = {
+    "out": "a frame on append/fades/marks/take, a file on analyze/snapshot/skill gen",
+    "track": "audio align takes mix|auto, the rest take a track number",
+    "target": "a length on some verbs, a LUFS value on others",
+    "size": "a LUT size on color lut, a share on others",
+}
+
+
+def test_shared_flag_names_keep_one_kind() -> None:
+    kinds: dict[str, dict[str, list[str]]] = {}
+    for path, spec in _specs():
+        for flag in spec.flags:
+            kinds.setdefault(flag.name.lstrip("-"), {}).setdefault(flag.kind, []).append(path)
+    for flag in GLOBAL_FLAGS:
+        kinds.setdefault(flag.name.lstrip("-"), {}).setdefault(flag.kind, []).append("(global)")
+    split = {
+        name: {kind: paths[:3] for kind, paths in by_kind.items()}
+        for name, by_kind in kinds.items()
+        if len(by_kind) > 1 and name not in KIND_EXCEPTIONS
+    }
+    assert split == {}, "one flag name, two kinds: rename one, or add it to KIND_EXCEPTIONS"
+    stale = [name for name in KIND_EXCEPTIONS if len(kinds.get(name, {})) < 2]
+    assert stale == [], "KIND_EXCEPTIONS entries that no longer split kinds"
+
+
+PAIR_EXCEPTIONS = {
+    "timeline diff": "fixed narrow columns",
+    "snapshot diff": "fixed narrow columns",
+    "audio gaps": "fixed narrow columns",
+    "storage ls": "fixed narrow columns",
+    "help": "fixed 3 columns",
+}
+
+
+def test_list_flags_come_in_pairs() -> None:
+    lopsided = []
+    for path, spec in _specs():
+        names = {flag.name.lstrip("-") for flag in spec.flags}
+        if ("fields" in names) != ("limit" in names) and path not in PAIR_EXCEPTIONS:
+            lopsided.append(path)
+    assert lopsided == [], (
+        "--limit without --fields (or the reverse): add the pair or PAIR_EXCEPTIONS"
+    )
+
+
+def test_default_true_bools_show_their_negation() -> None:
+    flagged: list[Flag] = [f for _, spec in _specs() for f in spec.flags if f.default is True]
+    assert flagged, "expected at least one default-true bool flag (render start --wait)"
+    for path, spec in _specs():
+        rows = cast(
+            list[dict[str, object]], helptext.render(spec, tuple(path.split())).get("flags", [])
+        )
+        for flag, row in zip(spec.flags, rows, strict=True):
+            if flag.kind == "bool" and flag.default is True:
+                assert "/--no-" in str(row["flag"]), (path, flag.name)
 
 
 @pytest.mark.live

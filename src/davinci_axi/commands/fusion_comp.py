@@ -51,6 +51,13 @@ def _need_comp(names: list[str], name: str, ref: str) -> None:
         raise not_found("comp", f"{name} on item {ref}", f"Comps: {', '.join(names) or '(none)'}")
 
 
+ITEM_COMP_NOTE = (
+    "verified on 21.1.1: effects added through the API to an item comp do not render, "
+    "in `render frame` stills or in full renders (a FilmGrain + Blur comp, links read back, "
+    "rendered unchanged); standalone Text+ titles from `fusion insert title` do render"
+)
+
+
 def run_add(inv: Invocation) -> Result:
     edit = open_item(inv)
     item = edit.item
@@ -59,14 +66,31 @@ def run_add(inv: Invocation) -> Result:
     def apply(plan: MutationPlan) -> None:
         if fusion_call("AddFusionComp", item.AddFusionComp) is None:
             raise api_failed("AddFusionComp", "Resolve did not add a comp")
+        new = [n for n in comp_names(item) if n not in before]
+        count = int(fusion_call("GetFusionCompCount", item.GetFusionCompCount) or 0)
+        plan.extra["count"] = count
+        plan.extra["adopted"] = bool(new) and count >= len(before) + 1
+        if not plan.extra["adopted"]:
+            plan.next.insert(
+                0,
+                "the item does not list the new comp (F22, observed on 21.1.1); see the notes "
+                "in `fusion --help`, and use `fusion insert title` for an effect that renders",
+            )
 
     def verify() -> dict[str, object]:
         return {"comps": len(comp_names(item))}
 
     changes = [Change("comps", len(before), len(before) + 1)]
-    return item_mutation(
-        inv, edit, "fusion comp add", ["fusion", "comp", "add"], changes, apply, verify
+    warning = f"(F29/F22) {ITEM_COMP_NOTE}" + (
+        ""
+        if before
+        else "; the item's first comp is permanent through the API (F17: DeleteFusionCompByName "
+        "refuses an only comp) and the snapshot restores the project without it"
     )
+    return item_mutation(
+        inv, edit, "fusion comp add", ["fusion", "comp", "add"], changes, apply, verify,
+        warning=warning,
+    )  # fmt: skip
 
 
 def _active_name(session: Session, names: list[str]) -> str | None:
@@ -162,7 +186,14 @@ def run_rename(inv: Invocation) -> Result:
     names = comp_names(item)
     _need_comp(names, old, edit.item_ref)
     if new != old and new in names:
-        raise AxiError("VALIDATION_ERROR", f"a comp named {new} already exists")
+        raise AxiError(
+            "VALIDATION_ERROR",
+            f"a comp named {new} already exists",
+            help=[
+                "Pick another name with --to",
+                "List the comps with `davinci-axi fusion comps --item <ref>`",
+            ],
+        )
 
     def apply(plan: MutationPlan) -> None:
         if not fusion_call("RenameFusionCompByName", item.RenameFusionCompByName, old, new):
@@ -187,21 +218,48 @@ def run_delete(inv: Invocation) -> Result:
     edit = ItemEdit(session, timeline, pre, ref.item_ref, ref.item)
     item = edit.item
     names = comp_names(item)
+    only = len(names) == 1
+    active = _active_name(session, names) == name
 
     def apply(plan: MutationPlan) -> None:
         path = export_comp(ref, "fusion comp delete")
         plan.extra["comp_snapshot"] = collapse_home(path)
         plan.next.append(restore_hint(path, ref.item_ref))
+        if not only and active:
+            other = next(n for n in names if n != name)
+            fusion_call("LoadFusionCompByName", item.LoadFusionCompByName, other)
+            plan.extra["loaded_first"] = other
         if not fusion_call("DeleteFusionCompByName", item.DeleteFusionCompByName, name):
-            raise api_failed("DeleteFusionCompByName", f"could not delete comp {name}")
+            cause = (
+                "Resolve 21.1.1 refused to delete an item's only comp live (F17); "
+                "an empty comp is a MediaIn -> MediaOut pass-through and renders normally"
+                if only
+                else "The comp may be the loaded one; run `fusion comp load <other>` then retry "
+                f"(comps: {', '.join(names)})"
+            )
+            raise AxiError(
+                "API_FAILED",
+                f"Resolve call DeleteFusionCompByName failed: could not delete comp {name}",
+                help=[
+                    cause,
+                    "To drop the item's Fusion processing entirely, restore the snapshot taken "
+                    "before `fusion comp add`",
+                ],
+                detail={"only_comp": only},
+            )
 
     return item_mutation(
         inv, edit, "fusion comp delete", ["fusion", "comp", "delete", name],
         [Change("comp", name, None)], apply,
         lambda: {"comp": name if name in comp_names(item) else None},
         irreversible=True,
-        warning="Fusion undo cannot bring a deleted comp back; the exported .comp file can",
-        extra={"comps_before": len(names)},
+        warning=(
+            "this is the item's only comp; Resolve 21.1.1 refused to delete an only comp live "
+            "(F17): expect API_FAILED, or keep it as a pass-through"
+            if only
+            else "Fusion undo cannot bring a deleted comp back; the exported .comp file can"
+        ),
+        extra={"comps_before": len(names), "only_comp": only},
     )  # fmt: skip
 
 
@@ -218,7 +276,14 @@ COMP_VERBS: dict[str, CommandSpec] = {
             f"davinci-axi fusion comp add {ITEM_EXAMPLE}",
             f"davinci-axi fusion comp add {ITEM_EXAMPLE} --force",
         ),
-        methods=(*_METHODS, "TimelineItem.AddFusionComp"),
+        methods=(*_METHODS, "TimelineItem.AddFusionComp", "TimelineItem.GetFusionCompCount"),
+        notes=(
+            "Read-back: comps (names) and count (GetFusionCompCount); adopted is false when the "
+            "item does not list the new comp",
+            ITEM_COMP_NOTE,
+            "`--via-page` fails when the Fusion page shows a different comp than the one the "
+            "API created (observed on 21.1.1)",
+        ),
     ),
     "import": mut_spec(
         "import",
@@ -272,7 +337,12 @@ COMP_VERBS: dict[str, CommandSpec] = {
         positionals=(_NAME,),
         flags=ITEM_FLAGS,
         examples=(f"davinci-axi fusion comp delete 'Composition 2' {ITEM_EXAMPLE} --force",),
-        methods=(*_METHODS, "TimelineItem.ExportFusionComp", "TimelineItem.DeleteFusionCompByName"),
+        methods=(
+            *_METHODS,
+            "TimelineItem.ExportFusionComp",
+            "TimelineItem.LoadFusionCompByName",
+            "TimelineItem.DeleteFusionCompByName",
+        ),
     ),
 }
 
@@ -311,5 +381,17 @@ SPEC = replace(
     ),
     methods=tuple(
         dict.fromkeys((*fusion.SPEC.methods, *(m for s in _EXTRA.values() for m in s.methods)))
+    ),
+    notes=(
+        *fusion.SPEC.notes,
+        f"F29/F22, {ITEM_COMP_NOTE}. In `render frame` stills no ladder step changed the render "
+        "(strength 3 and Blur 60 gave an identical md5); `fusion cache set auto|enabled|disabled` "
+        'fails with API_FAILED on API-built comps; `--via-page` fails with "the Fusion page '
+        'shows Composition4, not Composition 1" because the page opens a different comp than '
+        "the one the API created. The steps tried, in order: 1 `fusion comp export` after the "
+        "edit, if the .comp lacks your tool Resolve did not keep it; 2 `page set fusion --force` "
+        "with the playhead on the item, then `fusion tools --active`; 3 `fusion cache set "
+        "auto|enabled|disabled --item <id> --force` and re-render; 4 redo the edit with "
+        "`--via-page`",
     ),
 )

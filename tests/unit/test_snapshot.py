@@ -25,6 +25,15 @@ def test_snapshot_writes_directory_and_three_files(fake_world: FakeWorld, tmp_pa
     assert snap.drp == snap.dir / "project.drp" and snap.state == snap.dir / "state.json"
 
 
+def test_manual_flag_is_written_to_meta(fake_world: FakeWorld) -> None:
+    session = connect(GlobalOpts())
+    manual = take_snapshot(session, reason="x", manual=True)
+    auto = take_snapshot(session, reason="render add")
+    assert manual.manual is True and auto.manual is False
+    assert json.loads((manual.dir / "meta.json").read_text())["manual"] is True
+    assert json.loads((auto.dir / "meta.json").read_text())["manual"] is False
+
+
 def test_state_json_nests_timelines_tracks_items_markers(fake_world: FakeWorld) -> None:
     snap = take_snapshot(connect(GlobalOpts()), reason="r")
     state = json.loads(snap.state.read_text())

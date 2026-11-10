@@ -258,6 +258,7 @@ def verb(
     *,
     read: bool = False,
     disk: bool = False,
+    notes: tuple[str, ...] = (),
 ) -> CommandSpec:
     """One leaf spec. `examples` are `|`-separated; a write verb gets a `--force` example added
     (not a read or a disk-only export). `methods` are space-separated `Class.Method` names."""
@@ -273,11 +274,16 @@ def verb(
         examples=tuple(shown),
         reads_only=read,
         methods=tuple(methods.split()),
+        notes=notes,
     )
 
 
 def parent(
-    name: str, summary: str, subcommands: dict[str, CommandSpec], examples: str
+    name: str,
+    summary: str,
+    subcommands: dict[str, CommandSpec],
+    examples: str,
+    notes: tuple[str, ...] = (),
 ) -> CommandSpec:
     """A parent spec whose `methods` are the union of its children's (R36 aggregation)."""
     return CommandSpec(
@@ -287,4 +293,5 @@ def parent(
         examples=tuple(examples.split("|")),
         reads_only=False,
         methods=tuple(dict.fromkeys(m for s in subcommands.values() for m in s.methods)),
+        notes=notes,
     )

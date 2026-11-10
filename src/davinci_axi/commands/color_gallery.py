@@ -3,36 +3,37 @@
 Stills are addressed by their 1-based position in `GalleryStillAlbum.GetStills()`; `--album` picks
 an album by name (default: the current still album). `still grab` needs the Color page (KTD27,
 OQ15): it opens it with `mutate.with_page` and reports `page_restored`; every other verb leaves
-the page alone. `still export` writes files only, so it takes `--overwrite` instead of `--force`
-and never snapshots.
+the page alone. `still export` and `still import` live in `color_stills_io` with the album helpers;
+`still export` writes files only (an image and a `.drx` per still), so it takes `--overwrite`
+instead of `--force` and never snapshots. Positions are creation order (a grab appends).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any, Protocol, cast
 
-from davinci_axi.commands.color_common import (
-    AlbumApi,
-    ColorProject,
-    GalleryApi,
-    parent,
-    project_write,
-    verb,
+from davinci_axi.commands.color_common import parent, project_write, verb
+from davinci_axi.commands.color_stills_io import (
+    POSITIONS,
+    STILL_FORMATS,
+    album_words,
+    albums_of,
+    find_album,
+    gallery_of,
+    parse_positions,
+    run_still_export,
+    run_still_import,
+    still_setup,
 )
-from davinci_axi.commands.project_io import tree_bytes
-from davinci_axi.errors import AxiError, api_failed, not_found
+from davinci_axi.errors import AxiError
 from davinci_axi.mutate import MUTATION_FLAGS, Change, check_snapshot_flags, with_page
-from davinci_axi.output import collapse_home, empty_state, hint
+from davinci_axi.output import empty_state, hint
 from davinci_axi.resolve_types import TimelineApi
-from davinci_axi.session import Session
 from davinci_axi.spec import CommandSpec, Flag, Invocation, Positional, Result
 
-STILL_FORMATS = ("dpx", "cin", "tif", "jpg", "png", "ppm", "bmp", "xpm")
 GRAB_SOURCES = {"first": 1, "middle": 2}
 ALBUM = Flag("album", "str", None, help="album name (default: the current still album)")
-POSITIONS = Positional("positions", help="comma-separated still positions, counted from 1")
 GALLERY_READS = "Project.GetGallery Gallery.GetAlbumName Gallery.GetCurrentStillAlbum"
 ALBUM_READS = f"{GALLERY_READS} Gallery.GetGalleryStillAlbums Gallery.GetGalleryPowerGradeAlbums"
 STILL_READS = f"{GALLERY_READS} GalleryStillAlbum.GetStills"
@@ -44,78 +45,8 @@ class GalleryTimeline(TimelineApi, Protocol):
     def GrabAllStills(self, stillFrameSource: int) -> list[Any] | None: ...
 
 
-def gallery_of(session: Session) -> GalleryApi:
-    gallery = cast(ColorProject, session.require_project()).GetGallery()
-    if gallery is None:
-        raise api_failed("Project.GetGallery", "this project has no gallery")
-    return cast(GalleryApi, gallery)
-
-
-def _albums(gallery: GalleryApi) -> list[tuple[str, str, AlbumApi]]:
-    still = gallery.GetGalleryStillAlbums() or []
-    power = gallery.GetGalleryPowerGradeAlbums() or []
-    return [("still", gallery.GetAlbumName(a), a) for a in still] + [
-        ("powergrade", gallery.GetAlbumName(a), a) for a in power
-    ]
-
-
-def find_album(gallery: GalleryApi, name: str | None) -> tuple[str, AlbumApi]:
-    """(album name, album): the one called `name`, or the current still album."""
-    if name is None:
-        current = gallery.GetCurrentStillAlbum()
-        if current is None:
-            hint_text = "Create one with `davinci-axi color album create`"
-            raise not_found("album", "(current)", hint_text)
-        return gallery.GetAlbumName(current), current
-    found = [(n, a) for _, n, a in _albums(gallery) if n == name]
-    if not found:
-        listing = ", ".join(n for _, n, _ in _albums(gallery)) or "(none)"
-        raise not_found("album", name, f"Albums in this gallery: {listing}")
-    if len(found) > 1:
-        raise AxiError(
-            "VALIDATION_ERROR",
-            f"{len(found)} albums are called {name}",
-            help=["Rename one with `davinci-axi color album rename`, then retry"],
-        )
-    return found[0]
-
-
-def parse_positions(text: str, count: int, album: str) -> list[int]:
-    try:
-        numbers = [int(part) for part in text.split(",") if part.strip()]
-    except ValueError:
-        numbers = []
-    if not numbers or len(set(numbers)) != len(numbers):
-        raise AxiError(
-            "VALIDATION_ERROR",
-            f"cannot read {text} as still positions",
-            help=["Valid example: 1,3 (positions counted from 1, each once)"],
-        )
-    bad = [str(n) for n in numbers if not 1 <= n <= count]
-    if bad:
-        raise not_found("still", ", ".join(bad), f"Album {album} has {count} stills (from 1)")
-    return numbers
-
-
-def _album_arg(inv: Invocation) -> str | None:
-    value = inv.args.get("album")
-    return value if isinstance(value, str) and value else None
-
-
-def _album_words(inv: Invocation) -> list[str]:
-    name = _album_arg(inv)
-    return ["--album", name] if name else []
-
-
-def _still_setup(inv: Invocation) -> tuple[Session, str, AlbumApi, list[Any]]:
-    check_snapshot_flags(inv)
-    session = inv.connect()
-    name, album = find_album(gallery_of(session), _album_arg(inv))
-    return session, name, album, album.GetStills() or []
-
-
 def run_still_list(inv: Invocation) -> Result:
-    _, name, album, stills = _still_setup(inv)
+    _, name, album, stills = still_setup(inv)
     rows = [{"position": i, "label": album.GetLabel(s)} for i, s in enumerate(stills, start=1)]
     empty = empty_state("stills", f"in album {name}", {})
     return Result({"album": name, "count": len(rows), "stills": rows or empty})
@@ -123,7 +54,7 @@ def run_still_list(inv: Invocation) -> Result:
 
 def run_still_grab(inv: Invocation) -> Result:
     check_snapshot_flags(inv)
-    word = inv.args.get("all")
+    word = inv.args.get("source")
     source = GRAB_SOURCES[str(word)] if word else None
     session = inv.connect()
     name, album = find_album(gallery_of(session), None)
@@ -131,6 +62,14 @@ def run_still_grab(inv: Invocation) -> Result:
     before = len(album.GetStills() or [])
     changes = [Change("stills", before, "more (one per video clip)" if source else before + 1)]
     extra: dict[str, object] = {"album": name}
+    next_lines = [hint("color still list", "list the stills of the album")]
+    if source is None:
+        extra["position"] = before + 1  # ASSUMED appended last (the fake does; check live)
+        next_lines.append(
+            hint(
+                f"color still delete {before + 1} --force", "remove the still from the album again"
+            )
+        )
 
     def call() -> bool:
         with with_page(session, "color") as switched:
@@ -147,56 +86,30 @@ def run_still_grab(inv: Invocation) -> Result:
         inv,
         session,
         command="color still grab",
-        words=["color", "still", "grab", *(["--all", str(word)] if word else [])],
+        words=["color", "still", "grab", *(["--source", str(word)] if word else [])],
         changes=changes,
         call=call,
         read=lambda: {"stills": len(album.GetStills() or [])},
         fail="Timeline.GrabAllStills" if source else "Timeline.GrabStill",
-        warning="grabs from the current clip at the playhead; the Color page opens and is restored",
+        warning=(
+            "grabs from the current clip at the playhead into album "
+            f"{name} and leaves the still there (delete it with `color still delete`); "
+            "the Color page opens and is restored"
+        ),
         extra=extra,
-        next_lines=[hint("color still list", "list the stills of the album")],
+        next_lines=next_lines,
     )
 
 
-def run_still_export(inv: Invocation) -> Result:
-    fmt, prefix = str(inv.args.get("format") or "png"), str(inv.args.get("prefix") or "still")
-    folder = Path(inv.positionals["dir"]).expanduser().resolve()
-    shown_dir = collapse_home(folder)
-    if folder.exists() and not folder.is_dir():
-        raise AxiError(
-            "VALIDATION_ERROR", f"{shown_dir} is not a directory", help=["Pass a directory"]
-        )
-    held = sorted(p.name for p in folder.glob(f"{prefix}_*.{fmt}")) if folder.is_dir() else []
-    if held and not inv.args.get("overwrite"):
-        raise AxiError(
-            "FILE_EXISTS",
-            f"{shown_dir} already holds {', '.join(held[:3])}",
-            help=["Pass --overwrite to replace them, or choose another --prefix or directory"],
-        )
-    _, name, album, stills = _still_setup(inv)
-    chosen = parse_positions(inv.positionals["positions"], len(stills), name)
-    folder.mkdir(parents=True, exist_ok=True)
-    if not album.ExportStills([stills[n - 1] for n in chosen], str(folder), prefix, fmt):
-        raise api_failed("GalleryStillAlbum.ExportStills", f"could not export from album {name}")
-    written = sorted(folder.glob(f"{prefix}*.{fmt}"))
-    if not written:
-        raise api_failed(
-            "GalleryStillAlbum.ExportStills", "Resolve reported success, wrote no file"
-        )
-    files = [{"name": p.name, "bytes": tree_bytes(p)} for p in written]
-    shown = ", ".join(map(str, chosen))
-    return Result({"album": name, "stills": shown, "dir": shown_dir, "format": fmt, "files": files})
-
-
 def run_still_delete(inv: Invocation) -> Result:
-    session, name, album, stills = _still_setup(inv)
+    session, name, album, stills = still_setup(inv)
     chosen = parse_positions(inv.positionals["positions"], len(stills), name)
     doomed = [stills[n - 1] for n in chosen]
     return project_write(
         inv,
         session,
         command="color still delete",
-        words=["color", "still", "delete", inv.positionals["positions"], *_album_words(inv)],
+        words=["color", "still", "delete", inv.positionals["positions"], *album_words(inv)],
         changes=[Change("stills", len(stills), len(stills) - len(chosen))],
         call=lambda: album.DeleteStills(doomed),
         read=lambda: {"stills": len(album.GetStills() or [])},
@@ -210,7 +123,7 @@ def run_still_delete(inv: Invocation) -> Result:
 
 def run_still_label(inv: Invocation) -> Result:
     text = inv.positionals["text"]
-    session, name, album, stills = _still_setup(inv)
+    session, name, album, stills = still_setup(inv)
     chosen = parse_positions(inv.positionals["position"], len(stills), name)
     if len(chosen) != 1:
         raise AxiError("VALIDATION_ERROR", "label one still at a time", help=["Pass one position"])
@@ -221,36 +134,12 @@ def run_still_label(inv: Invocation) -> Result:
         inv,
         session,
         command="color still label",
-        words=["color", "still", "label", str(position), text, *_album_words(inv)],
+        words=["color", "still", "label", str(position), text, *album_words(inv)],
         changes=[Change("label", before, text)] if before != text else [],
         call=lambda: album.SetLabel(still, text),
         read=lambda: {"label": album.GetLabel(still)},
         fail="GalleryStillAlbum.SetLabel",
         extra={"album": name, "position": position},
-    )
-
-
-def run_still_import(inv: Invocation) -> Result:
-    check_snapshot_flags(inv)
-    raw = [part.strip() for part in inv.positionals["files"].split(",") if part.strip()]
-    paths = [Path(part).expanduser().resolve() for part in raw]
-    if not paths:
-        raise AxiError("VALIDATION_ERROR", "no files given", help=["Pass comma-separated files"])
-    for path in paths:
-        if not path.is_file():
-            raise not_found("file", collapse_home(path), "Check the path of the still file")
-    session, name, album, stills = _still_setup(inv)
-    return project_write(
-        inv,
-        session,
-        command="color still import",
-        words=["color", "still", "import", inv.positionals["files"], *_album_words(inv)],
-        changes=[Change("stills", len(stills), len(stills) + len(paths))],
-        call=lambda: album.ImportStills([str(p) for p in paths]),
-        read=lambda: {"stills": len(album.GetStills() or [])},
-        fail="GalleryStillAlbum.ImportStills",
-        extra={"album": name},
-        next_lines=[hint("color still list", "list the stills of the album")],
     )
 
 
@@ -265,7 +154,7 @@ def run_album_list(inv: Invocation) -> Result:
             "stills": len(a.GetStills() or []),
             "current": k == "still" and n == live,
         }
-        for k, n, a in _albums(gallery)
+        for k, n, a in albums_of(gallery)
     ]
     empty = empty_state("albums", "in this gallery", {})
     return Result({"count": len(rows), "albums": rows or empty})
@@ -279,7 +168,7 @@ def run_album_create(inv: Invocation) -> Result:
     gallery = gallery_of(session)
 
     def count() -> int:
-        return sum(1 for k, _, _ in _albums(gallery) if k == kind)
+        return sum(1 for k, _, _ in albums_of(gallery) if k == kind)
 
     before = count()
     extra: dict[str, object] = {"kind": kind}
@@ -360,6 +249,7 @@ def _leaf(
     example: str,
     methods: str,
     kind: str = "write",
+    notes: tuple[str, ...] = (),
 ) -> CommandSpec:
     return verb(
         name,
@@ -371,6 +261,7 @@ def _leaf(
         methods,
         read=kind == "read",
         disk=kind == "disk",
+        notes=notes,
     )
 
 
@@ -380,15 +271,27 @@ STILL_SPEC = parent(
     {
         "grab": _leaf(
             "grab",
-            "Grab a still of the current clip, or of every clip with --all",
+            "Grab a still of the current clip, or of every clip with --source",
             run_still_grab,
             (),
             (
                 *MUTATION_FLAGS,
-                Flag("all", "str", None, choices=tuple(GRAB_SOURCES), help="all clips"),
+                Flag(
+                    "source",
+                    "str",
+                    None,
+                    choices=tuple(GRAB_SOURCES),
+                    help="grab every clip, at its first or middle frame",
+                    renamed_from="all",
+                ),
             ),
-            "davinci-axi color still grab|davinci-axi color still grab --all middle --force",
+            "davinci-axi color still grab|davinci-axi color still grab --source middle --force",
             f"{STILL_READS} Timeline.GrabStill Timeline.GrabAllStills",
+            notes=(
+                "Every grab adds a still to the current album; export it with `color still "
+                "export <position> <dir>` and delete it with `color still delete <position> "
+                "--force` when it was only a means to a .drx",
+            ),
         ),
         "list": _leaf(
             "list",
@@ -414,6 +317,12 @@ STILL_SPEC = parent(
             "davinci-axi color still export 1,2 ~/stills --prefix shot --format png",
             f"{STILL_READS} GalleryStillAlbum.ExportStills",
             "disk",
+            (
+                "Resolve writes a .drx grade file beside every exported image, whatever "
+                "--format; there is no drx-only export",
+                "The files are listed under files; the .drx is what `color grade apply-drx` "
+                "and `color grade init --drx` take",
+            ),
         ),
         "import": _leaf(
             "import",

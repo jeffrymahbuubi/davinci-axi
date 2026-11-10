@@ -75,13 +75,14 @@ def test_still_grab_all_counts_one_still_per_video_clip(
     run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld
 ) -> None:
     gallery = _gallery(fake_world)
-    code, out, _ = run_cli(["color", "still", "grab", "--all", "middle"])
+    code, out, _ = run_cli(["color", "still", "grab", "--source", "middle"])
     assert code == 0 and "one per video clip" in out
     code, out, _ = run_cli(["color", "still", "grab", "--all", "middle", "--force"])
     assert code == 0 and fake_world.calls_to("Timeline.GrabAllStills") == [(2,)]
+    assert "--all is now --source; the old name still works" in out
     assert len(gallery.current.stills) == 4  # three video clips on V1 plus the title on V2
     assert "stills,0,4" in out
-    assert run_cli(["color", "still", "grab", "--all", "last"])[0] == 2
+    assert run_cli(["color", "still", "grab", "--source", "last"])[0] == 2
 
 
 def test_still_grab_on_the_color_page_changes_no_page(run_cli: Run, fake_world: FakeWorld) -> None:
@@ -111,7 +112,7 @@ def test_still_list_label_and_export(
     gallery = _gallery(fake_world)
     code, out, _ = run_cli(["color", "still", "list"])
     assert code == 0 and "0 stills in album Stills 1" in out
-    _grab(run_cli, fake_world, "--all", "first")
+    _grab(run_cli, fake_world, "--source", "first")
     code, out, _ = run_cli(["color", "still", "label", "2", "hero", "--force"])
     assert code == 0 and gallery.current.stills[1].label == "hero"
     code, out, _ = run_cli(["color", "still", "list"])
@@ -122,7 +123,8 @@ def test_still_list_label_and_export(
         ["color", "still", "export", "1,2", str(out_dir), "--prefix", "s", "--format", "png"]
     )
     assert (code, err) == (0, ""), out
-    assert sorted(p.name for p in out_dir.iterdir()) == ["s_1.png", "s_2.png"]
+    assert sorted(p.name for p in out_dir.iterdir()) == ["s_1.drx", "s_1.png", "s_2.drx", "s_2.png"]
+    assert "drx: 2" in out and "s_1.drx" in out and "s_2.png" in out
     assert fake_world.write_calls() == ["GalleryStillAlbum.ExportStills"]  # no save, no snapshot
     code, out, _ = run_cli(["color", "still", "export", "1", str(out_dir), "--prefix", "s"])
     assert code == 1 and "FILE_EXISTS" in out
@@ -138,11 +140,44 @@ def test_still_list_label_and_export(
         assert run_cli(argv)[0] in (1, 2), argv
 
 
+def test_still_export_lists_the_drx_and_guards_it(
+    run_cli: Run, fake_world: FakeWorld, tmp_path: Path
+) -> None:
+    _gallery(fake_world)
+    _grab(run_cli, fake_world)
+    out_dir = tmp_path / "drx"
+    out_dir.mkdir()
+    (out_dir / "still_1.drx").write_text("old\n", encoding="utf-8")
+    code, out, _ = run_cli(["color", "still", "export", "1", str(out_dir)])
+    assert code == 1 and "FILE_EXISTS" in out and "still_1.drx" in out
+    code, out, _ = run_cli(["color", "still", "export", "1", str(out_dir), "--overwrite"])
+    assert code == 0 and "still_1.png" in out and "still_1.drx" in out and "drx: 1" in out
+    code, out, _ = run_cli(["color", "still", "export", "--help"])
+    assert code == 0 and ".drx" in out
+
+
+def test_still_grab_reports_its_position_and_the_delete_hint(
+    run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld
+) -> None:
+    gallery = _gallery(fake_world)
+    _grab(run_cli, fake_world, "--source", "first")
+    count = len(gallery.current.stills)
+    code, out, _ = run_cli(["color", "still", "grab", "--force"])
+    keys = parse_toon_keys(out)
+    assert code == 0 and keys["position"] == str(count + 1)
+    assert len(gallery.current.stills) == count + 1
+    assert f"color still delete {count + 1} --force" in out
+    code, out, _ = run_cli(["color", "still", "grab", "--source", "middle", "--force"])
+    assert code == 0 and "position" not in parse_toon_keys(out)
+    code, out, _ = run_cli(["color", "still", "grab", "--help"])
+    assert code == 0 and "color still delete" in out
+
+
 def test_still_delete_is_irreversible_and_import_adds(
     run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld, tmp_path: Path
 ) -> None:
     gallery = _gallery(fake_world)
-    _grab(run_cli, fake_world, "--all", "first")
+    _grab(run_cli, fake_world, "--source", "first")
     code, out, _ = run_cli(["color", "still", "delete", "2,3"])
     assert code == 0 and "irreversible: true" in out and fake_world.write_calls() == []
     code, out, _ = run_cli(["color", "still", "delete", "2,3", "--force"])

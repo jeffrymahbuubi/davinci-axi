@@ -99,6 +99,35 @@ def mark_offline(project: FakeProject, *names: str) -> None:
     walk(project.media_pool.root)
 
 
+def add_opens_deliver(project: FakeProject, enabled: bool = True) -> None:
+    """Build helper (opt-in): `AddRenderJob`, `SetRenderSettings` and `StartRendering` open Deliver.
+
+    That is what live Resolve does (F40b/F44). Off by default so the write-call lists of older
+    tests do not gain the restoring `OpenPage`. While a job renders, `GetCurrentPage` is empty and
+    `OpenPage` refuses (F45c live).
+    """
+    project.__dict__["add_opens_deliver"] = enabled
+
+
+def _page_hidden(resolve: FakeResolve) -> bool:
+    project = resolve.pm.current_project
+    return bool(project and project.__dict__.get("add_opens_deliver") and project.rendering)
+
+
+def _get_current_page(self: FakeResolve) -> str:
+    return self._ret("GetCurrentPage", "" if _page_hidden(self) else self.page)
+
+
+def _open_page(self: FakeResolve, pageName: str) -> bool:
+    injected, value = self._rec("OpenPage", pageName)
+    if injected:
+        return bool(value)
+    if _page_hidden(self):
+        return False
+    self.page = pageName
+    return True
+
+
 def _set_render_settings(self: FakeProject, settings: dict[str, Any]) -> bool:
     injected, value = self._rec("SetRenderSettings", settings)
     if injected:
@@ -106,6 +135,8 @@ def _set_render_settings(self: FakeProject, settings: dict[str, Any]) -> bool:
     if not settings or any(key not in SETTING_KEYS for key in settings):
         return False
     pending_settings(self).update(settings)
+    if self.__dict__.get("add_opens_deliver"):
+        self._world.resolve.page = "deliver"
     return True
 
 
@@ -128,6 +159,8 @@ def _add_render_job(self: FakeProject) -> str:
     preset = self.__dict__.get("loaded_preset")
     if preset:
         info["PresetName"] = preset
+    if self.__dict__.get("add_opens_deliver"):
+        self._world.resolve.page = "deliver"
     return str(info["JobId"])
 
 
@@ -141,6 +174,8 @@ def _start_rendering(self: FakeProject, jobIds: list[str], isInteractiveMode: bo
     for job_id in ids:
         self.render_status[job_id] = {"JobStatus": "Rendering", "CompletionPercentage": 0}
     self.rendering = True
+    if self.__dict__.get("add_opens_deliver"):
+        self._world.resolve.page = "deliver"
     return True
 
 
@@ -245,9 +280,10 @@ def _export_current_frame(self: FakeProject, filePath: str) -> bool:
         return bool(value)
     if self.current_timeline is None:
         return False
-    Path(filePath).write_text(
-        f"{STILL_PLACEHOLDER}{self.current_timeline.name}\n", encoding="utf-8"
-    )
+    timeline = self.current_timeline
+    shown = timeline.__dict__.get("viewer_tc")  # set once the playhead was moved (F30)
+    at = f"@{shown}" if shown else ""
+    Path(filePath).write_text(f"{STILL_PLACEHOLDER}{timeline.name}{at}\n", encoding="utf-8")
     return True
 
 
@@ -373,6 +409,8 @@ _METHODS: dict[tuple[type[Any], str], Callable[..., Any]] = {
     (FakeProject, "SetQuickExportEnabledForRenderPreset"): _set_quick_export_enabled,
     (FakeProject, "SetCurrentRenderFormatAndCodec"): _set_format_and_codec,
     (FakeProject, "SetCurrentRenderMode"): _set_render_mode,
+    (FakeResolve, "GetCurrentPage"): _get_current_page,
+    (FakeResolve, "OpenPage"): _open_page,
     (FakeResolve, "ImportRenderPreset"): _import_render_preset,
     (FakeResolve, "ExportRenderPreset"): _export_render_preset,
 }

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import cast
 
+from davinci_axi.commands.item_detail import takes_count
 from davinci_axi.commands.item_extra_types import ItemExtra
 from davinci_axi.commands.item_markers import (
     ITEM_FLAGS,
@@ -102,7 +103,7 @@ def run_take_add(inv: Invocation) -> Result:
     ctx = Ctx(session, cast(MediaPoolEdit, pool), pool.GetRootFolder())
     clip = resolve_clip(ctx, inv.positionals["clip"]).clip
     item = _item(target)
-    before = int(item.GetTakesCount())
+    before = takes_count(item)
     words = ["item", "take", "add", target.ref, inv.positionals["clip"], *tl_words(inv)]
     for flag, value in (("--in", start), ("--out", end)):
         if value is not None:
@@ -129,7 +130,7 @@ def run_take_add(inv: Invocation) -> Result:
             raise api_failed("TimelineItem.AddTake", f"could not add {clip.GetName()} as a take")
 
     def verify() -> dict[str, object]:
-        count = int(item.GetTakesCount())
+        count = takes_count(item)
         take = (item.GetTakeByIndex(count) or {}) if count else {}
         media = take.get("mediaPoolItem")
         text = _take_text(
@@ -147,7 +148,7 @@ def run_take_add(inv: Invocation) -> Result:
 def run_take_delete(inv: Invocation) -> Result:
     target = open_target(inv)
     item = _item(target)
-    before = int(item.GetTakesCount())
+    before = takes_count(item)
     number = _index(inv, before)
     words = ["item", "take", "delete", target.ref, str(number), *tl_words(inv)]
     plan = _plan(target, "item take delete", [Change("takes", before, before - 1)], words, inv)
@@ -158,15 +159,13 @@ def run_take_delete(inv: Invocation) -> Result:
         if not item.DeleteTakeByIndex(number):
             raise api_failed("TimelineItem.DeleteTakeByIndex", f"take {number} was not deleted")
 
-    return run_mutation(
-        inv, target.session, plan, apply, lambda: {"takes": int(item.GetTakesCount())}
-    )
+    return run_mutation(inv, target.session, plan, apply, lambda: {"takes": takes_count(item)})
 
 
 def run_take_select(inv: Invocation) -> Result:
     target = open_target(inv)
     item = _item(target)
-    number = _index(inv, int(item.GetTakesCount()))
+    number = _index(inv, takes_count(item))
     now = int(item.GetSelectedTakeIndex())
     words = ["item", "take", "select", target.ref, str(number), *tl_words(inv)]
     plan = _plan(
@@ -193,7 +192,7 @@ def run_take_select(inv: Invocation) -> Result:
 def run_take_finalize(inv: Invocation) -> Result:
     target = open_target(inv)
     item = _item(target)
-    before = int(item.GetTakesCount())
+    before = takes_count(item)
     if before == 0:
         raise AxiError(
             "VALIDATION_ERROR",
@@ -211,17 +210,16 @@ def run_take_finalize(inv: Invocation) -> Result:
         if not item.FinalizeTake():
             raise api_failed("TimelineItem.FinalizeTake", "the take selection was not finalized")
 
-    return run_mutation(
-        inv, target.session, plan, apply, lambda: {"takes": int(item.GetTakesCount())}
-    )
+    return run_mutation(inv, target.session, plan, apply, lambda: {"takes": takes_count(item)})
 
 
 def run_take_list(inv: Invocation) -> Result:
     target = open_target(inv)
     item = target.item
-    selected = int(item.GetSelectedTakeIndex())
+    count = takes_count(item)
+    selected = int(item.GetSelectedTakeIndex() or 0) if count else 0
     rows: list[dict[str, object]] = []
-    for index in range(1, int(item.GetTakesCount()) + 1):
+    for index in range(1, count + 1):
         take = item.GetTakeByIndex(index) or {}
         clip = take.get("mediaPoolItem")
         rows.append(

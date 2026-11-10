@@ -168,7 +168,26 @@ def run_fades(inv: Invocation) -> Result:
     target.session.require_version("item fades", SPEED_MINIMUM)
     item = target.item
     current = item.GetFades() or {}
-    full = {key: int(wanted.get(key, current.get(key) or 0)) for key in ("FadeIn", "FadeOut")}
+    duration = int(item.GetDuration())
+    limit = max(duration - 1, 0)
+    flags = {"FadeIn": "in", "FadeOut": "out"}
+    notes: list[str] = []
+    requested: dict[str, int] = {}
+    clamped_to: dict[str, int] = {}
+    for key, value in wanted.items():
+        clamped_to[key] = min(value, limit)
+        if clamped_to[key] != value:
+            requested[key] = value
+            notes.append(
+                f"--{flags[key]} {value} is longer than the item allows; "
+                f"clamped to {clamped_to[key]} (item is {duration} frames)"
+            )
+    full = {key: int(clamped_to.get(key, current.get(key) or 0)) for key in ("FadeIn", "FadeOut")}
+    if full["FadeIn"] + full["FadeOut"] > duration:
+        notes.append(
+            f"fade-in and fade-out overlap (sum {full['FadeIn'] + full['FadeOut']} > "
+            f"{duration} frames); Resolve may shorten one of them"
+        )
     names = {"FadeIn": "fade_in", "FadeOut": "fade_out"}
     changes = [
         Change(names[key], int(current.get(key) or 0), full[key])
@@ -184,8 +203,11 @@ def run_fades(inv: Invocation) -> Result:
         target=target.label,
         changes=changes,
         force_cmd=force_cmd(inv, *words),
+        warning="; ".join(notes),
         next=[show_hint(inv, target.ref)],
     )
+    if requested:
+        plan.extra["requested"] = {names[key]: value for key, value in requested.items()}
 
     def apply() -> None:
         if not item.SetFades(dict(full)):

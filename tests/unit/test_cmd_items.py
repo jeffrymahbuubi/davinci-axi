@@ -184,6 +184,12 @@ def test_limit_shows_two_of_six_and_hints_the_full_command(
     assert "Run `davinci-axi items --limit 6` to list all 6 items" in out
 
 
+def test_cut_list_is_marked_truncated_in_json(run_cli: Run, fake_world: FakeWorld) -> None:
+    cut = json.loads(run_cli(["--json", "items", "--limit", "2"])[1])
+    assert cut["total"] == 6 and cut["truncated"] is True
+    assert "truncated" not in json.loads(run_cli(["--json", "items"])[1])
+
+
 def test_item_hint_points_at_the_first_listed_item(run_cli: Run, fake_world: FakeWorld) -> None:
     _, out, _ = run_cli(["items", "--track-type", "audio"])
     assert "Run `davinci-axi item A1:1` to show that item in detail" in out
@@ -300,6 +306,34 @@ def test_item_audio_shorthand(run_cli: Run, parse_toon_keys: Keys, fake_world: F
     keys = parse_toon_keys(out)
     assert keys["name"] == "music_bed" and keys["track"] == "A1" and keys["type"] == "Audio"
     assert "  AudioVolume: 0" in out
+
+
+def test_audio_item_reads_back_volume_and_fades_without_a_take_selector(
+    run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld
+) -> None:
+    """F25: Resolve returns None from GetTakesCount on audio items; `item A1:1` used to crash."""
+    code, out, err = run_cli(["item", "A1:1"])
+    assert (code, err) == (0, "")
+    assert "takes: []" in out and "  AudioVolume: 0" in out
+    assert "fades:\n  in: 0\n  out: 0" in out
+    assert fake_world.calls_to("TimelineItem.GetSelectedTakeIndex") == []
+    _, by_id, _ = run_cli(["item", parse_toon_keys(out)["id"]])
+    assert by_id == out
+
+
+def test_item_fades_are_hidden_before_resolve_21_1(run_cli: Run, fake_world: FakeWorld) -> None:
+    fake_world.resolve.version = [20, 3, 1, 1, ""]
+    code, out, _ = run_cli(["item", "A1:1"])
+    assert code == 0 and "fades" not in out
+    assert fake_world.calls_to("TimelineItem.GetFades") == []
+
+
+def test_video_item_with_a_none_takes_count_lists_no_takes(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    fake_world.inject("TimelineItem.GetTakesCount", None)
+    code, out, _ = run_cli(["item", "V1:1"])
+    assert code == 0 and "takes: []" in out
 
 
 def test_item_timeline_flag_scopes_the_lookup(
@@ -421,3 +455,45 @@ def test_read_commands_make_no_write_calls_and_keep_the_page(
     assert fake_world.page_changes() == []
     assert fake_world.resolve.page == "color"
     assert _project(fake_world).current_timeline is current
+
+
+def test_audit_fields_on_audio_items(run_cli: Run) -> None:
+    fields = "name,volume,fade_in,fade_out"
+    code, out, _ = run_cli(["items", "--track-type", "audio", "--fields", fields, "--json"])
+    rows = json.loads(out)["items"]
+    assert code == 0 and len(rows) == 2
+    assert all(r["volume"] == 0.0 and r["fade_in"] == 0 and r["fade_out"] == 0 for r in rows)
+
+
+def test_audit_fields_on_video_items(run_cli: Run) -> None:
+    fields = "name,zoom,pan,tilt,resolution,super_scale"
+    _, out, _ = run_cli(["items", "--track-type", "video", "--fields", fields, "--json"])
+    rows = {r["name"]: r for r in json.loads(out)["items"]}
+    assert rows["clip-1"]["zoom"] == 1.0 and rows["clip-1"]["resolution"] == "1920x1080"
+    assert rows["clip-1"]["pan"] == 0.0 and rows["clip-1"]["super_scale"] == 1
+    assert rows["Title"]["resolution"] is None and rows["Title"]["super_scale"] is None
+
+
+def test_fps_is_a_float_and_volume_is_null_on_video(run_cli: Run, fake_world: FakeWorld) -> None:
+    media = _clip(fake_world, 1).GetMediaPoolItem()
+    assert media is not None
+    media.properties["FPS"] = "24"
+    _, out, _ = run_cli(["items", "--track-type", "video", "--fields", "fps,volume", "--json"])
+    first = json.loads(out)["items"][0]
+    assert first["fps"] == 24.0 and type(first["fps"]) is float and first["volume"] is None
+
+
+def test_default_items_reads_no_audit_data(run_cli: Run, fake_world: FakeWorld) -> None:
+    run_cli(["items"])
+    run_cli(["items", "--fields", "name,media,end"])
+    for method in ("TimelineItem.GetFades", "TimelineItem.GetProperties"):
+        assert fake_world.calls_to(method) == []
+    assert fake_world.calls_to("MediaPoolItem.GetClipProperty") == []
+
+
+def test_bogus_field_lists_the_audit_fields_before_any_resolve_call(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    code, out, err = run_cli(["items", "--fields", "bogus"])
+    assert code == 2 and "fade_in" in out + err and "super_scale" in out + err
+    assert fake_world.calls_to("Project.GetCurrentTimeline") == []

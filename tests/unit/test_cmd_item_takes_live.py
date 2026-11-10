@@ -46,3 +46,19 @@ def test_take_add_verifies_the_new_clip(run_cli: Run, fake_world: FakeWorld) -> 
     args = ["item", "take", "add", "V1:1", "A002_city", "--in", "30", "--out", "120", "--force"]
     code, out, _ = run_cli(args)
     assert code == 1 and "VERIFY_FAILED" in out and "snapshot" in out
+
+
+def test_audio_item_without_a_take_selector_is_not_a_crash(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    """F25: GetTakesCount is None on audio items; every take verb must exit 0 or 2."""
+    code, out, err = run_cli(["item", "take", "list", "A1:1"])
+    assert (code, err) == (0, "") and "takes" in out
+    assert fake_world.calls_to("TimelineItem.GetSelectedTakeIndex") == []
+    code, out, _ = run_cli(["item", "take", "finalize", "A1:1"])
+    assert code == 2 and "has no takes" in out
+    code, out, _ = run_cli(["item", "take", "select", "A1:1", "1"])
+    assert code == 2
+    code, out, _ = run_cli(["item", "take", "add", "A1:1", "music_bed", "--force"])
+    assert code == 0, out
+    assert "takes,0,2" in out and "original_became_take_1" in out

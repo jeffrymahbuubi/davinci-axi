@@ -370,7 +370,7 @@ def test_the_fake_graph_registry_and_undo_stack(fake_world: FakeWorld) -> None:
     assert media_out.GetInput("Index") == 0.0 and media_out.GetInput("Nope") is None
     fusion = fake_world.resolve.Fusion()
     assert fusion.GetCurrentComp() is None
-    assert len(fusion.GetRegList("CT_Modifier")) == 1 and len(fusion.GetRegList()) == 7
+    assert len(fusion.GetRegList(2)) == 1 and len(fusion.GetRegList()) == 9
     assert fusion.GetRegAttrs("Blur")["REGS_ID"] == "Blur" and fusion.GetRegAttrs("zz") is None
     assert comp.GetUndoStack() == [] and comp.Undo(1) is False
     comp.StartUndo("a")

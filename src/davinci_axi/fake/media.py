@@ -23,6 +23,11 @@ class FakeMediaPoolItem(FakeBase):
         fps: str = "24",
         start_tc: str = "01:00:00:00",
         clip_type: str = "Video + Audio",
+        resolution: str = "1920x1080",
+        video_codec: str = "H.264",
+        frames: str | None = None,
+        date_created: str = "Sat Nov 1 2025 10:00:00",
+        audio_ch: str = "2",
     ) -> None:
         super().__init__(world)
         self.name = name
@@ -40,6 +45,16 @@ class FakeMediaPoolItem(FakeBase):
             "Duration": duration,
             "FPS": fps,
             "Start TC": start_tc,
+            "Resolution": resolution,
+            "Video Codec": video_codec,
+            "Frames": ("" if clip_type == "Audio" else "240") if frames is None else frames,
+            "Date Created": date_created,
+            "Audio Ch": audio_ch,
+            "Super Scale": 1,
+            "Scene": "",
+            "Shot": "",
+            "Take": "",
+            "Camera #": "",
         }
         self.mark_in_out: dict[str, Any] = {}
 

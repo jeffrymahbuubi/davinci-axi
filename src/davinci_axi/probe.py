@@ -9,6 +9,8 @@ from pathlib import Path
 
 from davinci_axi import paths
 
+STARTUP_SECONDS = 120.0
+
 
 def is_fake() -> bool:
     """True when `DAVINCI_AXI_FAKE=1` selects the built-in fake world."""
@@ -39,6 +41,50 @@ def process_running() -> bool:
         return _linux_process_running()
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def _parse_etime(text: str) -> float | None:
+    """Parse `ps -o etime=` output: `05`, `01:05`, `02:03:04` or `1-02:03:04` (seconds)."""
+    try:
+        days_part, sep, rest = text.strip().partition("-")
+        days = int(days_part) if sep else 0
+        clock = rest if sep else days_part
+        total = 0
+        for piece in clock.split(":"):
+            total = total * 60 + int(piece)
+        return float(days * 86400 + total)
+    except ValueError:
+        return None
+
+
+def process_age_seconds() -> float | None:
+    """How long the Resolve process has run (macOS `ps etime`); None when unknown.
+
+    Fake mode answers 5.0 for the "starting" world and 600.0 otherwise.
+    """
+    if is_fake():
+        from davinci_axi.fake import current_world
+
+        return 5.0 if current_world().connection == "starting" else 600.0
+    if sys.platform != "darwin":
+        return None
+    try:
+        found = subprocess.run(
+            ["pgrep", "-x", "Resolve"], capture_output=True, text=True, timeout=2, check=False
+        )
+        pids = found.stdout.split()
+        if found.returncode != 0 or not pids:
+            return None
+        shown = subprocess.run(
+            ["ps", "-o", "etime=", "-p", pids[0]],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        return _parse_etime(shown.stdout) if shown.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _linux_process_running() -> bool:

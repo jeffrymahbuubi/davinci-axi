@@ -126,54 +126,6 @@ def test_third_party_set_and_show(run_cli: Run, fake_world: FakeWorld, tmp_path:
     assert code == 2
 
 
-def test_property_set_reads_back_each_key(
-    run_cli: Run, fake_world: FakeWorld, tmp_path: Path
-) -> None:
-    args = ["media", "property", "set", "A001_beach", "Alpha mode=Straight,Comments=ok"]
-    code, out, _ = run_cli(args)
-    assert code == 0 and "Alpha mode" in out and _keys(out)["applied"] == "false"
-    _untouched(fake_world, tmp_path)
-    code, out, _ = run_cli([*args, "--force"])
-    assert code == 0 and _keys(out)["applied"] == "true"
-    assert fake_world.write_calls() == [SAVE, EXPORT] + ["MediaPoolItem.SetClipProperty"] * 2
-    assert _clip(fake_world, "A001_beach").properties["Alpha mode"] == "Straight"
-
-
-def test_property_set_treats_equal_numbers_as_equal(run_cli: Run, fake_world: FakeWorld) -> None:
-    clip = _clip(fake_world, "A001_beach")
-    clip.properties["Gain"] = "1"
-    original = type(clip).SetClipProperty
-
-    def normalising(self: FakeMediaPoolItem, name: str, value: str) -> bool:
-        ok = original(self, name, value)
-        self.properties[name] = f"{float(value)}"
-        return ok
-
-    type(clip).SetClipProperty = normalising  # type: ignore[method-assign]
-    try:
-        code, out, _ = run_cli(["media", "property", "set", "A001_beach", "Gain=2", "--force"])
-    finally:
-        type(clip).SetClipProperty = original  # type: ignore[method-assign]
-    assert code == 0 and _keys(out)["applied"] == "true"
-
-
-def test_property_set_failure_names_the_key_and_what_was_applied(
-    run_cli: Run, fake_world: FakeWorld
-) -> None:
-    clip = _clip(fake_world, "A001_beach")
-    original = type(clip).SetClipProperty
-
-    def refuse_second(self: FakeMediaPoolItem, name: str, value: str) -> bool:
-        return False if name == "Two" else original(self, name, value)
-
-    type(clip).SetClipProperty = refuse_second  # type: ignore[method-assign]
-    try:
-        code, out, _ = run_cli(["media", "property", "set", "A001_beach", "One=1,Two=2", "--force"])
-    finally:
-        type(clip).SetClipProperty = original  # type: ignore[method-assign]
-    assert code == 1 and "could not set Two (already applied: One)" in out
-
-
 # ---- replace, fullres, monitor ------------------------------------------------------------
 
 
@@ -293,7 +245,7 @@ def test_every_media_path_has_help_with_examples(run_cli: Run) -> None:
         ("media", "stereo", "create"),
     ):
         assert expected in paths
-    assert len(paths) == 26 + 24
+    assert len(paths) == 26 + 26
     for path in paths:
         code, out, err = run_cli([*path, "--help"])
         assert code == 0 and err == "", path

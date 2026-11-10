@@ -65,10 +65,30 @@ def test_unknown_flag_names_valid_flags() -> None:
     assert "davinci-axi items --help" in err.help[1]
 
 
-def test_renamed_flag_gets_targeted_hint() -> None:
-    with pytest.raises(AxiError) as caught:
-        flags.parse(SPEC, ["--sort", "x"])
-    assert "renamed to --order" in caught.value.message
+def test_renamed_flag_is_accepted_under_the_new_key_with_a_note() -> None:
+    args, _ = flags.parse(SPEC, ["--sort", "x"])
+    assert args["order"] == "x" and "sort" not in args
+    assert args["_renamed"] == ["--sort is now --order; the old name still works"]
+    args, _ = flags.parse(SPEC, ["--sort=y", "--sort", "z"])
+    assert args["order"] == "z" and len(args["_renamed"]) == 1  # type: ignore[arg-type]
+    args, _ = flags.parse(SPEC, ["--order", "x"])
+    assert "_renamed" not in args
+
+
+def test_renamed_flag_converts_with_the_new_flag_and_accepts_the_no_form() -> None:
+    spec = CommandSpec(
+        name="move",
+        summary="Move",
+        flags=(
+            Flag("count", "int", 1, renamed_from="n"),
+            Flag("wait", "bool", True, renamed_from="block"),
+        ),
+    )
+    args, _ = flags.parse(spec, ["--n", "3", "--no-block"])
+    assert (args["count"], args["wait"]) == (3, False)
+    assert len(args["_renamed"]) == 2  # type: ignore[arg-type]
+    with pytest.raises(AxiError, match="expects int"):
+        flags.parse(spec, ["--n", "many"])
 
 
 def test_bad_values() -> None:

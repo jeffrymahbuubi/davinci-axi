@@ -264,10 +264,11 @@ def test_insert_adds_one_item_and_warns_about_the_track(
     method: str,
     item_kind: str,
 ) -> None:
-    code, out, _ = run_cli(["timeline", "insert", kind, "Solid Color"])
-    assert code == 0 and "Source Track Selector" in parse_toon_keys(out)["warning"]
+    args = ["timeline", "insert", kind, "Solid Color", "--allow-ripple"]
+    code, out, _ = run_cli(args)
+    assert code == 0 and "lands on V1" in parse_toon_keys(out)["warning"]
     assert fake_world.write_calls() == []
-    code, out, _ = run_cli(["timeline", "insert", kind, "Solid Color", "--force"])
+    code, out, _ = run_cli([*args, "--force"])
     assert code == 0 and parse_toon_keys(out)["applied"] == "true"
     assert fake_world.calls_to(f"Timeline.{method}") == [("Solid Color",)]
     added = _edit(fake_world).tracks["video"][0].items[-1]
@@ -278,7 +279,8 @@ def test_insert_on_a_locked_track_is_api_failed(
     run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld
 ) -> None:
     _edit(fake_world).tracks["video"][0].locked = True
-    code, out, _ = run_cli(["timeline", "insert", "title", "Text", "--force"])
+    args = ["timeline", "insert", "title", "Text", "--allow-ripple", "--force"]
+    code, out, _ = run_cli(args)
     assert code == 1 and parse_toon_keys(out)["code"] == "API_FAILED"
     assert "locked" in out
     assert len(_edit(fake_world).tracks["video"][0].items) == 3

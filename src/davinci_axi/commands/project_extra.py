@@ -24,6 +24,7 @@ from davinci_axi.commands.project_io import (
     next_steps,
     text_arg,
 )
+from davinci_axi.commands.settings_show import PROJECT_SETTINGS_SHOW_SPEC
 from davinci_axi.errors import AxiError, api_failed, not_found
 from davinci_axi.mutate import (
     MUTATION_FLAGS,
@@ -400,8 +401,21 @@ CLOUD_SPEC = CommandSpec(
 _PRESET_SPEC = build_kind_spec(SETTINGS_PRESETS, "preset")
 SETTINGS_SPEC = replace(
     project.SETTINGS_SPEC,
-    subcommands={**project.SETTINGS_SPEC.subcommands, "preset": _PRESET_SPEC},
-    methods=tuple(dict.fromkeys((*project.SETTINGS_SPEC.methods, *_PRESET_SPEC.methods))),
+    summary="Show or change project settings",
+    subcommands={
+        **project.SETTINGS_SPEC.subcommands,
+        "preset": _PRESET_SPEC,
+        "show": PROJECT_SETTINGS_SHOW_SPEC,
+    },
+    methods=tuple(
+        dict.fromkeys(
+            (
+                *project.SETTINGS_SPEC.methods,
+                *_PRESET_SPEC.methods,
+                *PROJECT_SETTINGS_SHOW_SPEC.methods,
+            )
+        )
+    ),
 )
 _EXTRA = {"settings": SETTINGS_SPEC, "restore": RESTORE_SPEC, "db": DB_SPEC, "cloud": CLOUD_SPEC}
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import shlex
 
 from davinci_axi import registry
-from davinci_axi.output import apply_limit, empty_state, hint, select_fields
+from davinci_axi.output import apply_limit, empty_state, hint, page_meta, select_fields
 from davinci_axi.resolve_types import TimelineApi
 from davinci_axi.spec import DEFAULT_LIMIT, LIST_FLAGS, CommandSpec, Invocation, Result
 
@@ -82,7 +82,7 @@ def run(inv: Invocation) -> Result:
     shown, total = apply_limit(rows, limit)
     data: dict[str, object] = {
         "project": project.GetName(),
-        "total": total,
+        **page_meta(len(shown), total),
         "current": current_name,
     }
     if shown:

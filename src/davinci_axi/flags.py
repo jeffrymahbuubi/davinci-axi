@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from davinci_axi.errors import AxiError
 from davinci_axi.spec import GLOBAL_FLAGS, CommandSpec, Flag
 
@@ -65,7 +67,9 @@ def parse(
     """Parse `argv` (global flags already removed) against `spec`.
 
     Returns (args, positionals). `args` is keyed by flag name with underscores for hyphens;
-    unset flags hold their default (bool flags default to False). Raises VALIDATION_ERROR for an
+    unset flags hold their default (bool flags default to False). A flag given by its old name
+    (`renamed_from`) is accepted and stored under the new key; `args["_renamed"]` then lists one
+    note per old name for the caller to surface. Raises VALIDATION_ERROR for an
     unknown flag, a bad value, a missing required flag or positional, or a surplus positional.
     """
     path = path or spec.name
@@ -86,10 +90,17 @@ def parse(
             continue
         body = token[2:]
         name, eq, inline = body.partition("=")
-        if name in renamed:
-            new = _flag_name(renamed[name])
-            raise _usage_error(spec, path, f"flag --{name} was renamed to --{new} for `{path}`")
         negated = False
+        old = None
+        if name in renamed:
+            old, name = name, _flag_name(renamed[name])
+        elif name.startswith("no-") and name[3:] in renamed and renamed[name[3:]].kind == "bool":
+            old, name, negated = name[3:], _flag_name(renamed[name[3:]]), True
+        if old is not None:
+            note = f"--{old} is now --{name}; the old name still works"
+            notes = cast(list[str], args.setdefault("_renamed", []))
+            if note not in notes:
+                notes.append(note)
         if (
             name not in by_name
             and name.startswith("no-")

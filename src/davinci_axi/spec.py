@@ -66,6 +66,7 @@ class CommandSpec:
     subcommands: dict[str, CommandSpec] = field(default_factory=dict)
     reads_only: bool = True
     methods: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
 
 
 GLOBAL_FLAGS: tuple[Flag, ...] = (

@@ -180,7 +180,7 @@ def _group_names(session: Session) -> list[str]:
     return [g.GetName() for g in _groups(session)]
 
 
-def _find(groups: list[ColorGroupApi], name: str) -> ColorGroupApi:
+def find_group(groups: list[ColorGroupApi], name: str) -> ColorGroupApi:
     for group in groups:
         if group.GetName() == name:
             return group
@@ -227,7 +227,7 @@ def run_group_add(inv: Invocation) -> Result:
 def run_group_rename(inv: Invocation) -> Result:
     old, new = inv.positionals["name"], _clean(str(inv.args.get("to") or ""), "new group")
     session, _ = _project_setup(inv)
-    group = _find(_groups(session), old)
+    group = find_group(_groups(session), old)
     if new != old and new in _group_names(session):
         raise _exists("GROUP_EXISTS", "color group", new)
     return project_write(
@@ -245,7 +245,7 @@ def run_group_rename(inv: Invocation) -> Result:
 def run_group_delete(inv: Invocation) -> Result:
     name = inv.positionals["name"]
     session, project = _project_setup(inv)
-    group = _find(_groups(session), name)
+    group = find_group(_groups(session), name)
     return project_write(
         inv,
         session,
@@ -271,7 +271,7 @@ def run_group_assign(inv: Invocation) -> Result:
     name = inv.positionals["name"]
     target = open_target(inv)
     item = color_item(target)
-    group = _find(_groups(target.session), name)
+    group = find_group(_groups(target.session), name)
     before = _group_name(item)
     return item_write(
         inv,

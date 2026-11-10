@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, cast
 
+from davinci_axi.commands.ai_preflight import IGNORE_FLAG, ai_mutation
 from davinci_axi.commands.ai_status import (
     AiPool,
     item_call,
@@ -235,9 +236,14 @@ def run_deblur(inv: Invocation) -> Result:
         command="ai deblur",
         target=scope.target,
         changes=[Change("new clips", None, "(new clips)")],
-        force_cmd=force_words(inv, [*scope.words, *flag_words(inv, ("set",))]),
+        force_cmd=force_words(
+            inv, [*scope.words, *flag_words(inv, ("set",))], ("ignore-preflight",)
+        ),
         extra={"options": options.text},
-        warning="renders deblurred copies into the media pool; needs AI Extras",
+        warning=(
+            "renders deblurred copies into the media pool; "
+            "needs the AI Extras package AI Motion Deblur"
+        ),
         next=[hint("media", "list the clips")],
     )
     created: list[MediaPoolItemApi] = []
@@ -259,7 +265,7 @@ def run_deblur(inv: Invocation) -> Result:
         found = [c.GetName() for c in created if where_is(ctx, c.GetUniqueId()) is not None]
         return {"new clips": ", ".join(found) or "(none)"}
 
-    return run_mutation(inv, ctx.session, plan, apply, verify)
+    return ai_mutation(inv, ctx.session, plan, apply, verify, package="AI Motion Deblur")
 
 
 # ---- multicam -------------------------------------------------------------------------------
@@ -354,10 +360,11 @@ def run_flatten(inv: Invocation) -> Result:
 
 DEBLUR_SPEC = verb(
     "deblur",
-    "Remove motion blur from clips or a folder into new clips (needs AI Extras)",
+    "Remove motion blur from clips or a folder into new clips "
+    "(needs the AI Extras package AI Motion Deblur)",
     run_deblur,
     positionals=SCOPE_ARGS,
-    flags=(FOLDER_FLAG, SET_FLAG),
+    flags=(FOLDER_FLAG, SET_FLAG, IGNORE_FLAG),
     examples=(
         "davinci-axi ai deblur A001_beach",
         "davinci-axi ai deblur A001_beach --set Format=mp4,Codec=H265 --force",

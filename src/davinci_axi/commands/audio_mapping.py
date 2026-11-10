@@ -47,6 +47,11 @@ MAPPING = Positional("mapping", help="audio mapping as a JSON string (only track
 
 # ---- voice isolation ------------------------------------------------------------------------
 
+VOICE_SCOPE_NOTE = (
+    "item and track isolation are separate settings; a track setting processes every "
+    "clip on that track whatever the item says, so both act when both are on"
+)
+
 
 @dataclass
 class VoiceTarget:
@@ -56,6 +61,7 @@ class VoiceTarget:
     read: Callable[[], dict[str, Any]]
     write: Callable[[dict[str, Any]], bool]
     words: list[str]
+    track_index: int | None = None
 
 
 def _open_voice(inv: Invocation, base: list[str]) -> VoiceTarget:
@@ -95,18 +101,26 @@ def _open_voice(inv: Invocation, base: list[str]) -> VoiceTarget:
         lambda: dict(item.GetVoiceIsolationState() or {}),
         lambda state: bool(item.SetVoiceIsolationState(state)),
         [*base, str(ref)],
+        int(one.track[1:]) if one.track[:1] == "A" and one.track[1:].isdigit() else None,
     )
 
 
 def run_voice_get(inv: Invocation) -> Result:
     target = _open_voice(inv, ["audio", "voice-isolation", "get"])
     state = target.read()
+    data: dict[str, object] = {
+        "target": target.label,
+        "enabled": state.get("isEnabled"),
+        "amount": state.get("amount"),
+    }
+    if target.track_index is not None:
+        track = dict(target.timeline.GetVoiceIsolationState(target.track_index) or {})
+        data["track"] = f"A{target.track_index}"
+        data["track_enabled"] = track.get("isEnabled")
+        data["track_amount"] = track.get("amount")
+    data["note"] = VOICE_SCOPE_NOTE
     return Result(
-        {
-            "target": target.label,
-            "enabled": state.get("isEnabled"),
-            "amount": state.get("amount"),
-        },
+        data,
         [hint("audio voice-isolation set <item> --on --amount 60", "change it (add --force)")],
     )
 
@@ -323,6 +337,7 @@ VOICE_GET_SPEC = CommandSpec(
         "davinci-axi audio voice-isolation get A1:1",
         "davinci-axi audio voice-isolation get --track 1",
     ),
+    notes=(VOICE_SCOPE_NOTE, "For an item the result also shows the track's setting"),
     methods=VOICE_METHODS + TIMELINE_READS,
 )
 VOICE_SET_SPEC = verb(
@@ -339,6 +354,12 @@ VOICE_SET_SPEC = verb(
     examples=(
         "davinci-axi audio voice-isolation set A1:1 --on --amount 60",
         "davinci-axi audio voice-isolation set --track 1 --off --force",
+    ),
+    notes=(
+        VOICE_SCOPE_NOTE,
+        "Voice isolation removes non-speech sound; on ambience-only or music audio it strips the "
+        "content (live: a track amount of 30 took an ambience mix from -16.3 to -23.7 LUFS). "
+        "Use it on speech tracks only",
     ),
     methods=VOICE_METHODS + TIMELINE_READS,
 )

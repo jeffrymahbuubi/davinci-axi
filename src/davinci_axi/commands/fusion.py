@@ -1,10 +1,9 @@
 """`fusion`: read Fusion comps, tools, wiring, the tool registry and the undo stack (R34, U17a).
 
 Every verb is read-only: no `--force`, no snapshot, no page switch (R24). A comp is addressed by
-`--item` (+ `--comp`) or, for reads only, `--active`. Each verb first checks that the target
-timeline is current (`preflight`) and runs every Fusion call under a timeout (`fusion_call`, quirk
-1); results carry `resolvepython_processes` and any `warnings`. U17b wraps `SPEC` with the
-mutating verbs.
+`--item` (+ `--comp`) or, for reads only, `--active`. Each verb checks that the target timeline is
+current (`preflight`) and runs every Fusion call under a timeout (`fusion_call`, quirk 1); results
+carry `resolvepython_processes` and any `warnings`. U17b wraps `SPEC` with the mutating verbs.
 """
 
 from __future__ import annotations
@@ -12,13 +11,42 @@ from __future__ import annotations
 import shlex
 from typing import Any, cast
 
+from davinci_axi.commands.fusion_reads_common import (
+    FIELDS_EDGES,
+    FIELDS_INPUTS,
+    FIELDS_REGISTRY,
+    FIELDS_TOOLS,
+    FIELDS_UNDO,
+    ITEM_FLAGS,
+    TIMELINE_FLAGS,
+    UNREADABLE_TYPES,
+)
+from davinci_axi.commands.fusion_reads_common import (
+    block as _block,
+)
+from davinci_axi.commands.fusion_reads_common import (
+    check_list_flags as _check_list_flags,
+)
+from davinci_axi.commands.fusion_reads_common import (
+    head as _head,
+)
+from davinci_axi.commands.fusion_reads_common import (
+    scalar as _scalar,
+)
+from davinci_axi.commands.fusion_reads_common import (
+    tail as _tail,
+)
+from davinci_axi.commands.fusion_reads_common import (
+    target as _target,
+)
+from davinci_axi.commands.fusion_reads_common import (
+    target_flags as _target_flags,
+)
 from davinci_axi.commands.item_detail import resolve_item, str_arg
 from davinci_axi.errors import AxiError
 from davinci_axi.fusion_guard import (
     FUSION_FLAGS,
     UNDO_PREFIX,
-    CompRef,
-    Preflight,
     TimelineItemFusion,
     attrs_of,
     find_tool,
@@ -26,91 +54,15 @@ from davinci_axi.fusion_guard import (
     fusion_call,
     lua_values,
     preflight,
-    resolve_comp,
+    source_label,
     tool_row,
     tools_of,
-    validate_target,
 )
-from davinci_axi.output import apply_limit, empty_state, hint, select_fields
-from davinci_axi.session import Session
+from davinci_axi.output import empty_state, hint
 from davinci_axi.spec import LIST_FLAGS, CommandSpec, Flag, Invocation, Positional, Result
 
-ITEM_FLAGS = tuple(f for f in FUSION_FLAGS if f.name in ("item", "timeline"))
-TIMELINE_FLAGS = tuple(f for f in FUSION_FLAGS if f.name == "timeline")
-FIELDS_TOOLS = ("name", "id", "passthrough", "x", "y")
-FIELDS_INPUTS = ("id", "name", "type", "value")
-FIELDS_EDGES = ("from", "output", "to", "input")
-FIELDS_REGISTRY = ("id", "name")
-FIELDS_UNDO = ("position", "name", "ours")
-UNREADABLE_TYPES = frozenset({"Image", "Mask"})
-
-
-def _scalar(value: object) -> object:
-    return value if value is None or isinstance(value, (str, int, float, bool)) else str(value)
-
-
-def _requested(inv: Invocation) -> list[str] | None:
-    raw = inv.args.get("fields")
-    return [str(f) for f in raw] if isinstance(raw, list) else None
-
-
-def _limit(inv: Invocation) -> int:
-    raw = inv.args.get("limit")
-    return raw if isinstance(raw, int) and not isinstance(raw, bool) else 100
-
-
-def _check_list_flags(inv: Invocation, default: tuple[str, ...]) -> None:
-    """Validate `--fields` and `--limit` before the first Resolve call (R11)."""
-    select_fields([dict.fromkeys(default)], default, _requested(inv))
-    apply_limit([], _limit(inv))
-
-
-def _target(inv: Invocation) -> tuple[Session, Preflight, CompRef]:
-    validate_target(inv, mutating=False)
-    session = inv.connect()
-    pre = preflight(session, inv)
-    return session, pre, resolve_comp(session, inv, mutating=False)
-
-
-def _head(pre: Preflight, ref: CompRef) -> dict[str, object]:
-    data: dict[str, object] = {"timeline": pre.timeline}
-    if ref.item_ref:
-        data["item"] = ref.item_ref
-    data["comp"] = ref.comp_name
-    return data
-
-
-def _tail(data: dict[str, object], pre: Preflight) -> dict[str, object]:
-    data["resolvepython_processes"] = pre.resolvepython_processes
-    if pre.warnings:
-        data["warnings"] = list(pre.warnings)
-    return data
-
-
-def _target_flags(ref: CompRef) -> str:
-    """The flags that address `ref` again, for next-step hints."""
-    if not ref.item_ref:
-        return "--active"
-    flags = f"--item {shlex.quote(ref.item_ref)}"
-    return flags if ref.comp_index <= 1 else f"{flags} --comp {shlex.quote(ref.comp_name)}"
-
-
-def _block(
-    inv: Invocation,
-    data: dict[str, object],
-    key: str,
-    rows: list[dict[str, object]],
-    default: tuple[str, ...],
-    empty: str,
-    noun: str,
-    total_key: str = "total",
-) -> tuple[list[dict[str, object]], list[str]]:
-    """Put the limited rows (or the empty-state text) under `key`; also return the --limit hint."""
-    shown, total = apply_limit(rows, _limit(inv))
-    data[total_key] = total
-    data[key] = select_fields(shown, default, _requested(inv)) if shown else empty
-    more = total > len(shown)
-    return shown, [f"Showing {len(shown)} of {total} {noun}; raise --limit to see more"] * more
+_REG_TYPES = "CT_Tool CT_Mask CT_SourceTool CT_ParticleTool CT_Modifier CT_ImageFormat"
+KNOWN_REG_TYPES = tuple(_REG_TYPES.split())
 
 
 def run_comps(inv: Invocation) -> Result:
@@ -136,8 +88,9 @@ def run_comps(inv: Invocation) -> Result:
         data["comps"] = [
             {"index": i, "name": n, "active": n == active} for i, n in enumerate(names, start=1)
         ]
-        first = f"fusion tools --item {shlex.quote(item_ref)}"
-        helps = [hint(first, "list the tools in the first comp")]
+        helps = [
+            hint(f"fusion tools --item {shlex.quote(item_ref)}", "list the first comp's tools")
+        ]
     else:
         data["comps"] = empty_state("comps", f"on item {item_ref}", {})
         helps = ["Create a comp for the item in Resolve first (Fusion page or Inspector)"]
@@ -147,18 +100,13 @@ def run_comps(inv: Invocation) -> Result:
 def run_comp_show(inv: Invocation) -> Result:
     _, pre, ref = _target(inv)
     attrs = attrs_of(ref.comp)
-    data = _head(pre, ref)
-    data["tools"] = len(tools_of(ref.comp))
+    data = {**_head(pre, ref), "tools": len(tools_of(ref.comp))}
     for key in ("render_start", "render_end", "global_start", "global_end"):
         data[key] = _scalar(attrs.get("COMPN_" + key.title().replace("_", "")))
     data["file"] = _scalar(attrs.get("COMPS_FileName"))
     data["locked"] = bool(fusion_call("IsLocked", ref.comp.IsLocked))
     data["undo_depth"] = len(lua_values(fusion_call("GetUndoStack", ref.comp.GetUndoStack)))
-    flags = _target_flags(ref)
-    return Result(
-        _tail(data, pre),
-        [hint(f"fusion tools {flags}", "list the tools of this comp")],
-    )
+    return Result(_tail(data, pre), [hint(f"fusion tools {_target_flags(ref)}", "list its tools")])
 
 
 def run_tools(inv: Invocation) -> Result:
@@ -166,9 +114,7 @@ def run_tools(inv: Invocation) -> Result:
     _, pre, ref = _target(inv)
     selected = bool(inv.args.get("selected"))
     regid = str_arg(inv, "type")
-    call_args: list[object] = [selected]
-    if regid is not None:
-        call_args.append(regid)
+    call_args: list[object] = [selected, *([] if regid is None else [regid])]
     found = lua_values(fusion_call("GetToolList", ref.comp.GetToolList, *call_args))
     rows: list[dict[str, object]] = []
     for tool in found:
@@ -201,6 +147,7 @@ def _input_rows(tool: Any) -> list[dict[str, object]]:
                 "name": attrs.get("INPS_Name"),
                 "type": data_type,
                 "value": value,
+                "source": source_label(port),
             }
         )
     return rows
@@ -212,11 +159,7 @@ def _output_rows(tool: Any) -> list[dict[str, object]]:
         attrs = attrs_of(port)
         linked = lua_values(fusion_call("GetConnectedInputs", port.GetConnectedInputs))
         rows.append(
-            {
-                "id": attrs.get("OUTS_ID"),
-                "name": attrs.get("OUTS_Name"),
-                "connected": len(linked) > 0,
-            }
+            {"id": attrs.get("OUTS_ID"), "name": attrs.get("OUTS_Name"), "connected": bool(linked)}
         )
     return rows
 
@@ -265,8 +208,7 @@ def run_tool_get(inv: Invocation) -> Result:
                 ],
             )
     data = _head(pre, ref)
-    data["tool"] = inv.positionals["name"]
-    data["input"] = input_id
+    data["tool"], data["input"] = inv.positionals["name"], input_id
     if when is not None:
         data["time"] = when
     data["value"] = _scalar(value)
@@ -302,24 +244,41 @@ def run_graph(inv: Invocation) -> Result:
     return Result(_tail(data, pre), helps)
 
 
-def _registry_row(entry: Any) -> dict[str, object]:
-    attrs = attrs_of(entry)
-    reg_id = attrs.get("REGS_ID")
-    return {"id": reg_id, "name": attrs.get("REGS_Name") or reg_id}
+def _bad_reg_type(name: str, got: object = None) -> AxiError:
+    known, find = f"Known types: {', '.join(KNOWN_REG_TYPES)}", "Use --search <text> instead"
+    why = f"unknown registry type {name}" if got is None else f"Fusion's {name} is {got!r}"
+    return AxiError("VALIDATION_ERROR", why, help=[known, find])
+
+
+def reg_mask(app: Any, name: str) -> int:
+    """The mask Fusion exposes as `fusion.CT_Tool`; the bridge may hand it over as a float."""
+    value = getattr(app, name, None)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value == int(value):
+        return int(value)
+    raise _bad_reg_type(name, "missing" if value is None else value)
 
 
 def run_registry(inv: Invocation) -> Result:
     _check_list_flags(inv, FIELDS_REGISTRY)
+    reg_type, search = str_arg(inv, "type"), str_arg(inv, "search") or ""
+    if reg_type is not None and reg_type not in KNOWN_REG_TYPES:
+        raise _bad_reg_type(reg_type)
     session = inv.connect()
     pre = preflight(session, inv)
     app = fusion_app(session)
-    reg_type = str_arg(inv, "type") or ""
-    rows = [
-        _registry_row(e) for e in lua_values(fusion_call("GetRegList", app.GetRegList, reg_type))
+    mask = () if reg_type is None else (reg_mask(app, reg_type),)
+    entries = lua_values(fusion_call("GetRegList", app.GetRegList, *mask))
+    ids = [
+        (a.get("REGS_ID"), a.get("REGS_Name") or a.get("REGS_ID")) for a in map(attrs_of, entries)
+    ]
+    rows: list[dict[str, object]] = [
+        {"id": i, "name": n} for i, n in ids if search.lower() in f"{i} {n}".lower()
     ]
     data: dict[str, object] = {"timeline": pre.timeline}
-    empty = empty_state("registry entries", "in Fusion", {"type": reg_type})
-    _, helps = _block(inv, data, "registry", rows, FIELDS_REGISTRY, empty, "entries")
+    data |= {k: v for k, v in (("type", reg_type), ("search", search)) if v}
+    empty = empty_state("registry entries", "in Fusion", {"type": reg_type, "search": search})
+    shown, helps = _block(inv, data, "registry", rows, FIELDS_REGISTRY, empty, "entries")
+    data["shown"] = len(shown)
     return Result(_tail(data, pre), helps)
 
 
@@ -405,13 +364,17 @@ TOOLS_SPEC = CommandSpec(
 
 TOOL_SHOW_SPEC = CommandSpec(
     name="show",
-    summary="Show a tool's inputs (id, name, type, value) and outputs",
+    summary="Show a tool's inputs (id, name, type, value, source) and outputs",
     run=run_tool_show,
     positionals=(Positional("name", help="tool name in the comp, such as Blur1"),),
     flags=(*FUSION_FLAGS, *LIST_FLAGS),
     examples=(
         "davinci-axi fusion tool show MediaOut1 --item V1:2",
         "davinci-axi fusion tool show Blur1 --item V1:2 --fields id,value --limit 20",
+    ),
+    notes=(
+        "Image and Mask inputs have no value; `source` names the Tool.Output feeding them "
+        "(null = unconnected), as `fusion graph` lists",
     ),
     methods=COMP_METHODS,
 )
@@ -446,6 +409,7 @@ GRAPH_SPEC = CommandSpec(
     run=run_graph,
     flags=(*FUSION_FLAGS, *LIST_FLAGS),
     examples=("davinci-axi fusion graph --item V1:2", "davinci-axi fusion graph --active --json"),
+    notes=("Edges are read from GetConnectedOutput: they are the wiring Fusion holds, not a plan",),
     methods=COMP_METHODS,
 )
 
@@ -455,13 +419,16 @@ REGISTRY_SPEC = CommandSpec(
     run=run_registry,
     flags=(
         *TIMELINE_FLAGS,
-        Flag("type", "str", None, help="registry type, such as CT_Tool"),
+        Flag("type", "str", None, help=f"registry type: {', '.join(KNOWN_REG_TYPES)}"),
+        Flag("search", "str", None, help="only ids or names containing this text, any case"),
         *LIST_FLAGS,
     ),
     examples=(
         "davinci-axi fusion registry",
         "davinci-axi fusion registry --type CT_Tool --limit 20",
+        "davinci-axi fusion registry --search grain",
     ),
+    notes=("Without --type Fusion lists all ~1400 entries; the data shows shown and total",),
     methods=("Resolve.Fusion",),
 )
 

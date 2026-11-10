@@ -6,12 +6,19 @@ import importlib
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from typing import cast
 
 from davinci_axi import paths
 from davinci_axi.errors import AxiError
-from davinci_axi.probe import is_fake, process_running, studio_licence_present
+from davinci_axi.probe import (
+    STARTUP_SECONDS,
+    is_fake,
+    process_age_seconds,
+    process_running,
+    studio_licence_present,
+)
 from davinci_axi.resolve_types import ResolveApp
 from davinci_axi.session import Session
 from davinci_axi.spec import GlobalOpts
@@ -19,6 +26,7 @@ from davinci_axi.spec import GlobalOpts
 __all__ = ["Probe", "connect", "is_fake", "probe"]
 
 SETTING_PATH = "Preferences > System > General > External scripting using"
+RETRY_INTERVAL = 0.5
 
 
 @dataclass(frozen=True)
@@ -122,6 +130,18 @@ def _classify_unreachable() -> AxiError:
                 "Restart Resolve after activating Studio, then retry",
             ],
         )
+    age = process_age_seconds()
+    if age is not None and age < STARTUP_SECONDS:
+        return AxiError(
+            "RESOLVE_STARTING",
+            "Resolve is running but its scripting server is not answering yet",
+            help=[
+                "Resolve is still loading: wait a few seconds and retry, or raise the wait, "
+                "for example --timeout 30",
+                f"If it still fails after {STARTUP_SECONDS:g} s, "
+                f"check that {SETTING_PATH} is Local",
+            ],
+        )
     help_lines = [
         f"In Resolve open {SETTING_PATH} and choose Local, then restart Resolve",
     ]
@@ -129,11 +149,21 @@ def _classify_unreachable() -> AxiError:
         help_lines.append(
             "If this is the Free edition, external scripting is not available (Studio only)"
         )
+    if age is None:
+        help_lines.append("If Resolve was opened moments ago, wait a few seconds and retry")
     return AxiError(
         "SCRIPTING_DISABLED",
         "Resolve is running but refused the scripting connection",
         help=help_lines,
     )
+
+
+def _may_be_starting() -> bool:
+    """Resolve is up with a Studio licence and was launched moments ago: worth retrying."""
+    if not (process_running() and studio_licence_present()):
+        return False
+    age = process_age_seconds()
+    return age is not None and age < STARTUP_SECONDS
 
 
 def _build_session(app: object) -> Session:
@@ -158,7 +188,11 @@ def _build_session(app: object) -> Session:
 
 def connect(opts: GlobalOpts) -> Session:
     """Return a live session or raise an AxiError carrying one of the KTD2 codes."""
+    deadline = time.monotonic() + opts.timeout
     app = _run_with_timeout(opts.timeout)
+    while app is None and _may_be_starting() and deadline - time.monotonic() > RETRY_INTERVAL:
+        time.sleep(RETRY_INTERVAL)
+        app = _run_with_timeout(deadline - time.monotonic())
     if app is None:
         raise _classify_unreachable()
     return _build_session(app)

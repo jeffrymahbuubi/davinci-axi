@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from typing import cast
 
+from davinci_axi.commands.ai_extras import EXTRAS_SPEC
 from davinci_axi.commands.ai_multicam import DEBLUR_SPEC, MULTICAM_SPEC
+from davinci_axi.commands.ai_preflight import IGNORE_FLAG, ai_mutation
 from davinci_axi.commands.ai_status import (
     ITEM_READS,
     REFRAME,
@@ -43,7 +45,7 @@ from davinci_axi.commands.item_detail import str_arg
 from davinci_axi.commands.render_common import force_words, methods_of, words
 from davinci_axi.commands.timeline_tracks import TIMELINE_FLAG
 from davinci_axi.errors import AxiError
-from davinci_axi.mutate import Change, MutationPlan, run_mutation
+from davinci_axi.mutate import Change, MutationPlan
 from davinci_axi.output import hint
 from davinci_axi.poll import POLL_FLAGS, poll_args
 from davinci_axi.spec import CommandSpec, Flag, Invocation, Positional, Result
@@ -61,13 +63,14 @@ ITEM = Positional("item", help="timeline item: V1:2 or a unique id")
 
 def run_analyze(inv: Invocation) -> Result:
     faces, better = bool(inv.args.get("faces")), bool(inv.args.get("better"))
+    package = "AI IntelliSearch - Better" if better else "AI IntelliSearch - Faster"
     scope = pick_scope(inv, ["ai", "intellisearch", "analyze"])
     plan = MutationPlan(
         command="ai intellisearch analyze",
         target=scope.target,
         changes=[Change("called", False, True)],
-        force_cmd=force_words(inv, scope.words, ("faces", "better")),
-        warning=f"analysis can take minutes and needs AI Extras; {UNREAD}",
+        force_cmd=force_words(inv, scope.words, ("faces", "better", "ignore-preflight")),
+        warning=f"analysis can take minutes and needs the AI Extras package {package}; {UNREAD}",
         next=[hint("ai status", "check the analysis jobs")],
     )
 
@@ -75,7 +78,9 @@ def run_analyze(inv: Invocation) -> Result:
         for target in scope.objects:
             require_ok(target.AnalyzeForIntellisearch(faces, better), "AnalyzeForIntellisearch")
 
-    return run_mutation(inv, scope.ctx.session, plan, apply, lambda: {"called": True})
+    return ai_mutation(
+        inv, scope.ctx.session, plan, apply, lambda: {"called": True}, package=package
+    )
 
 
 def run_reset(inv: Invocation) -> Result:
@@ -94,7 +99,7 @@ def run_reset(inv: Invocation) -> Result:
     def apply() -> None:
         require_ok(project.ResetIntellisearchAnalysis(), "Project.ResetIntellisearchAnalysis")
 
-    return run_mutation(inv, session, plan, apply, lambda: {"called": True})
+    return ai_mutation(inv, session, plan, apply, lambda: {"called": True})
 
 
 # ---- slate ----------------------------------------------------------------------------------
@@ -121,9 +126,11 @@ def run_slate(inv: Invocation) -> Result:
         command="ai slate",
         target=scope.target,
         changes=[],
-        force_cmd=force_words(inv, [*scope.words, *flag_words(inv, ("marker",))]),
+        force_cmd=force_words(
+            inv, [*scope.words, *flag_words(inv, ("marker",))], ("ignore-preflight",)
+        ),
         extra={"marker": word},
-        warning="marks the clips where a slate is found; needs AI Extras",
+        warning="marks the clips where a slate is found; needs the AI Extras package AI Slate ID",
         next=[hint("ai status", "check the analysis jobs"), hint("media", "list the clips")],
     )
 
@@ -131,7 +138,7 @@ def run_slate(inv: Invocation) -> Result:
         for target in scope.objects:
             require_ok(cast(AiClip, target).AnalyzeForSlate(color), "AnalyzeForSlate")
 
-    return run_job(inv, session, plan, SLATE, start)
+    return run_job(inv, session, plan, SLATE, start, package="AI Slate ID")
 
 
 # ---- magic mask, stabilize, reframe ---------------------------------------------------------
@@ -207,12 +214,19 @@ def run_reframe(inv: Invocation) -> Result:
 # ---- specs ----------------------------------------------------------------------------------
 
 
-def _group(name: str, summary: str, subs: dict[str, CommandSpec], *examples: str) -> CommandSpec:
+def _group(
+    name: str,
+    summary: str,
+    subs: dict[str, CommandSpec],
+    *examples: str,
+    notes: tuple[str, ...] = (),
+) -> CommandSpec:
     return CommandSpec(
         name=name,
         summary=summary,
         subcommands=subs,
         examples=examples,
+        notes=notes,
         reads_only=False,
         methods=tuple(dict.fromkeys(m for s in subs.values() for m in s.methods)),
     )
@@ -227,6 +241,7 @@ ANALYZE_SPEC = verb(
         FOLDER_FLAG,
         Flag("faces", "bool", False, help="identify faces"),
         Flag("better", "bool", False, help="use the slower, better analysis mode"),
+        IGNORE_FLAG,
     ),
     examples=(
         "davinci-axi ai intellisearch analyze A001_beach --faces",
@@ -251,6 +266,7 @@ SLATE_SPEC = verb(
         FOLDER_FLAG,
         Flag("marker", "str", None, help=f"marker color (default blue): {', '.join(MARKER_WORDS)}"),
         *POLL_FLAGS,
+        IGNORE_FLAG,
     ),
     examples=(
         "davinci-axi ai slate A001_beach --marker green",
@@ -263,6 +279,12 @@ SLATE_SPEC = verb(
         Project="GetAnalyzeForSlateStatus",
     )
     + MEDIA_READS,
+)
+MASK_NOTES = (
+    "Resolve returns only True/False: the mask cannot be read back, listed or tracked by script, "
+    "and no scripted effect (Object Removal, blur, node key) can be attached to it; use it from "
+    "the Color page.",
+    "Check the node that holds it with `color graph --item V1:1` (the node's tools).",
 )
 MASK_CREATE_SPEC = verb(
     "create",
@@ -283,6 +305,7 @@ MASK_CREATE_SPEC = verb(
         "davinci-axi ai magic-mask create V1:1 --mode both",
         "davinci-axi ai magic-mask create V1:1 --force",
     ),
+    notes=MASK_NOTES,
     methods=methods_of(TimelineItem="CreateMagicMask") + ITEM_READS,
 )
 MASK_REGENERATE_SPEC = verb(
@@ -295,15 +318,20 @@ MASK_REGENERATE_SPEC = verb(
         "davinci-axi ai magic-mask regenerate V1:1",
         "davinci-axi ai magic-mask regenerate V1:1 --force",
     ),
+    notes=MASK_NOTES,
     methods=methods_of(TimelineItem="RegenerateMagicMask") + ITEM_READS,
 )
 STABILIZE_SPEC = verb(
     "stabilize",
-    "Stabilize a timeline item (not read back)",
+    "Stabilize a timeline item (synchronous; not read back)",
     run_stabilize,
     positionals=(ITEM,),
     flags=(TIMELINE_FLAG,),
     examples=("davinci-axi ai stabilize V1:1", "davinci-axi ai stabilize V1:1 --force"),
+    notes=(
+        "Synchronous: Stabilize() returns when the analysis is done (1-5 s per clip live); nothing "
+        "reads the result back, check a still with `render frame`",
+    ),
     methods=methods_of(TimelineItem="Stabilize") + ITEM_READS,
 )
 REFRAME_SPEC = verb(
@@ -321,6 +349,7 @@ REFRAME_SPEC = verb(
 )
 
 SUBCOMMANDS: dict[str, CommandSpec] = {
+    "extras": EXTRAS_SPEC,
     "intellisearch": _group(
         "intellisearch",
         "Intellisearch analysis of clips and folders",
@@ -335,6 +364,10 @@ SUBCOMMANDS: dict[str, CommandSpec] = {
         {"create": MASK_CREATE_SPEC, "regenerate": MASK_REGENERATE_SPEC},
         "davinci-axi ai magic-mask create V1:1 --mode both",
         "davinci-axi ai magic-mask regenerate V1:1",
+        notes=(
+            "Write-only in the API: create or regenerate, then finish in the Color page. "
+            "For intrusions a scripted route is `item set` (zoom/pan) or a trim.",
+        ),
     ),
     "stabilize": STABILIZE_SPEC,
     "reframe": REFRAME_SPEC,

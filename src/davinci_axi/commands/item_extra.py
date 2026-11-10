@@ -12,6 +12,7 @@ from dataclasses import replace
 from typing import cast
 
 from davinci_axi.commands import item_edit
+from davinci_axi.commands.item_batch import DELETE_SPEC
 from davinci_axi.commands.item_detail import TRACK_TYPES, resolve_item, walk_items
 from davinci_axi.commands.item_extra_blanking import (
     BLANKING_SPEC,
@@ -28,6 +29,7 @@ from davinci_axi.commands.item_markers import (
     show_hint,
     tl_words,
 )
+from davinci_axi.commands.item_set_edl import SET_EXT_SPEC
 from davinci_axi.commands.timeline_extra_common import run_called, split_refs
 from davinci_axi.errors import AxiError, api_failed
 from davinci_axi.mutate import (
@@ -244,6 +246,8 @@ WRAPPED_MARKER = replace(
 )
 
 NEW: dict[str, CommandSpec] = {
+    "set": SET_EXT_SPEC,
+    "delete": DELETE_SPEC,
     "link": LINK_SPEC,
     "unlink": UNLINK_SPEC,
     "transition": TRANSITION_SPEC,
@@ -268,6 +272,11 @@ def _all_methods() -> tuple[str, ...]:
 SPEC = replace(
     item_edit.SPEC,
     subcommands={**item_edit.SPEC.subcommands, **NEW},
+    notes=(
+        *item_edit.SPEC.notes,
+        "A transition item (item <id> on a dissolve) shows the clips it joins as sides.left "
+        "and sides.right",
+    ),
     examples=(
         *item_edit.SPEC.examples,
         "davinci-axi item link V1:1,A1:1 --force",

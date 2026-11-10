@@ -11,6 +11,7 @@ HOME = "davinci_axi.commands.home:SPEC"
 # One line per command, added by the lead in this order: projects, timelines, items, item,
 # render, project, skill, hook. `home` is implicit (no arguments, or the `home` command).
 COMMANDS: dict[str, str] = {
+    "help": "davinci_axi.commands.help_find:SPEC",
     "projects": "davinci_axi.commands.projects:SPEC",
     "timelines": "davinci_axi.commands.timelines:SPEC",
     "timeline": "davinci_axi.commands.timeline_extra:SPEC",

@@ -6,11 +6,13 @@ save, snapshot, write and read-back with `--force`.
 
 from __future__ import annotations
 
+import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import cast
 
 from davinci_axi import markers, registry
+from davinci_axi.commands.timeline_track_lock import switch_spec
 from davinci_axi.errors import AxiError, api_failed
 from davinci_axi.mutate import (
     MUTATION_FLAGS,
@@ -102,6 +104,48 @@ def timecode_arg(inv: Invocation) -> str:
     return code
 
 
+def nominal_fps(rate: object) -> int:
+    """The whole-number frame count per second: 29.97 -> 30, "23.976" -> 24, 25.0 -> 25."""
+    try:
+        value = float(str(rate))
+    except ValueError:
+        return 24
+    nearest = round(value)
+    return nearest if abs(value - nearest) < 0.01 else math.ceil(value)
+
+
+def check_timecode_fields(code: str, settings: Mapping[str, object]) -> None:
+    """VALIDATION_ERROR when a field of `code` is out of range for the timeline's rate, or the
+    frame is a dropped frame on a drop-frame timeline. `code` already matches TIMECODE."""
+    hh, mm, ss, ff = (int(part) for part in re.split(r"[:;]", code))
+    rate = settings.get("timelineFrameRate", 24)
+    fps = nominal_fps(rate)
+    if ff >= fps:
+        raise AxiError(
+            "VALIDATION_ERROR",
+            f"frame field {ff:02d} is out of range for a {rate} fps timeline (00-{fps - 1})",
+            help=["Valid example: 01:00:11:29 at 30 fps"],
+        )
+    for name, number, limit in (("hour", hh, 24), ("minute", mm, 60), ("second", ss, 60)):
+        if number >= limit:
+            raise AxiError(
+                "VALIDATION_ERROR",
+                f"{name} field {number:02d} is out of range",
+                help=["Valid example: 01:00:11:29 (hour 00-23, minute and second 00-59)"],
+            )
+    flag = str(settings.get("timelineDropFrameTimecode", "0")).strip()
+    drop = ";" in code or flag in ("1", "true", "True")
+    if drop and fps in (30, 60) and ss == 0 and mm % 10 != 0 and ff < fps // 15:
+        raise AxiError(
+            "VALIDATION_ERROR",
+            f"{code} is a dropped frame on this drop-frame timeline",
+            help=[
+                "Drop-frame timelines skip frames 00-01 (29.97) or 00-03 (59.94) at the start of "
+                "each minute except every tenth"
+            ],
+        )
+
+
 def finish(
     inv: Invocation,
     session: Session,
@@ -120,7 +164,7 @@ def finish(
     return run_mutation(inv, session, plan, apply, verify)
 
 
-def _kind(inv: Invocation) -> str:
+def track_kind(inv: Invocation) -> str:
     kind = inv.positionals["type"]
     if kind not in TRACK_KINDS:
         raise AxiError(
@@ -131,7 +175,7 @@ def _kind(inv: Invocation) -> str:
     return kind
 
 
-def _index(inv: Invocation) -> int:
+def track_index(inv: Invocation) -> int:
     raw = inv.positionals["n"]
     try:
         index = int(raw)
@@ -146,7 +190,7 @@ def _index(inv: Invocation) -> int:
     return index
 
 
-def _existing_track(timeline: TimelineApi, kind: str, index: int) -> None:
+def existing_track(timeline: TimelineApi, kind: str, index: int) -> None:
     count = timeline.GetTrackCount(kind)
     if index > count:
         raise AxiError(
@@ -158,7 +202,7 @@ def _existing_track(timeline: TimelineApi, kind: str, index: int) -> None:
 
 def run_add(inv: Invocation) -> Result:
     check_snapshot_flags(inv)
-    kind, subtype = _kind(inv), text_arg(inv, "subtype")
+    kind, subtype = track_kind(inv), text_arg(inv, "subtype")
     if subtype is not None and kind != "audio":
         raise AxiError(
             "VALIDATION_ERROR",
@@ -194,10 +238,10 @@ def run_add(inv: Invocation) -> Result:
 
 def run_delete(inv: Invocation) -> Result:
     check_snapshot_flags(inv)
-    kind, index = _kind(inv), _index(inv)
+    kind, index = track_kind(inv), track_index(inv)
     session = inv.connect()
     timeline = target_timeline(session, inv)
-    _existing_track(timeline, kind, index)
+    existing_track(timeline, kind, index)
     before = timeline.GetTrackCount(kind)
     on_track = len(timeline.GetItemListInTrack(kind, index) or [])
     plan = MutationPlan(
@@ -226,7 +270,7 @@ def run_delete(inv: Invocation) -> Result:
 
 def run_rename(inv: Invocation) -> Result:
     check_snapshot_flags(inv)
-    kind, index = _kind(inv), _index(inv)
+    kind, index = track_kind(inv), track_index(inv)
     new = text_arg(inv, "to")
     if new is None:
         raise AxiError(
@@ -236,7 +280,7 @@ def run_rename(inv: Invocation) -> Result:
         )
     session = inv.connect()
     timeline = target_timeline(session, inv)
-    _existing_track(timeline, kind, index)
+    existing_track(timeline, kind, index)
     before = timeline.GetTrackName(kind, index)
     plan = MutationPlan(
         command="timeline track rename",
@@ -254,54 +298,6 @@ def run_rename(inv: Invocation) -> Result:
         "SetTrackName",
         lambda: timeline.SetTrackName(kind, index, new),
         lambda: {"track_name": timeline.GetTrackName(kind, index)},
-    )
-
-
-def _switch(verb: str, field_name: str, value: bool, setter: str, getter: str) -> CommandSpec:
-    """`enable|disable` (`SetTrackEnable`) and `lock|unlock` (`SetTrackLock`)."""
-
-    def run(inv: Invocation) -> Result:
-        check_snapshot_flags(inv)
-        kind, index = _kind(inv), _index(inv)
-        session = inv.connect()
-        timeline = target_timeline(session, inv)
-        _existing_track(timeline, kind, index)
-        read = cast(Callable[[str, int], bool], getattr(timeline, getter))
-        write = cast(Callable[[str, int, bool], bool], getattr(timeline, setter))
-        before = read(kind, index)
-        plan = MutationPlan(
-            command=f"timeline track {verb}",
-            target=f"timeline {timeline.GetName()}, {kind} track {index}",
-            changes=[] if before == value else [Change(field_name, before, value)],
-            force_cmd=force_cmd(
-                inv, "timeline", "track", verb, kind, str(index), *context_words(inv)
-            ),
-            next=timelines_hint(),
-        )
-        return finish(
-            inv,
-            session,
-            plan,
-            setter,
-            lambda: write(kind, index, value),
-            lambda: {field_name: read(kind, index)},
-        )
-
-    return CommandSpec(
-        name=verb,
-        summary=f"{verb.capitalize()} a track of a timeline",
-        run=run,
-        positionals=(
-            Positional("type", help="track type: video, audio or subtitle"),
-            Positional("n", help="1-based track number"),
-        ),
-        flags=(TIMELINE_FLAG, *MUTATION_FLAGS),
-        examples=(
-            f"davinci-axi timeline track {verb} video 2",
-            f"davinci-axi timeline track {verb} audio 1 --force",
-        ),
-        reads_only=False,
-        methods=(f"Timeline.{setter}", f"Timeline.{getter}"),
     )
 
 
@@ -401,10 +397,10 @@ TRACK_SPEC = CommandSpec(
             reads_only=False,
             methods=("Timeline.SetTrackName", "Timeline.GetTrackName"),
         ),
-        "enable": _switch("enable", "enabled", True, "SetTrackEnable", "GetIsTrackEnabled"),
-        "disable": _switch("disable", "enabled", False, "SetTrackEnable", "GetIsTrackEnabled"),
-        "lock": _switch("lock", "locked", True, "SetTrackLock", "GetIsTrackLocked"),
-        "unlock": _switch("unlock", "locked", False, "SetTrackLock", "GetIsTrackLocked"),
+        "enable": switch_spec("enable", "enabled", True, "SetTrackEnable", "GetIsTrackEnabled"),
+        "disable": switch_spec("disable", "enabled", False, "SetTrackEnable", "GetIsTrackEnabled"),
+        "lock": switch_spec("lock", "locked", True, "SetTrackLock", "GetIsTrackLocked"),
+        "unlock": switch_spec("unlock", "locked", False, "SetTrackLock", "GetIsTrackLocked"),
     },
     reads_only=False,
     methods=(

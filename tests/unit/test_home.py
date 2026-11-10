@@ -122,21 +122,102 @@ def test_only_the_first_ten_timelines_are_listed(
     assert "timelines[10]{name,frames,current}:" in out
 
 
+def _help_lines(out: str) -> list[str]:
+    lines = out.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("help["))
+    return [line.strip() for line in lines[start + 1 :] if line.startswith("  ")]
+
+
+def test_default_world_hints_follow_the_state(run_cli: Run, fake_world: FakeWorld) -> None:
+    _, out, _ = run_cli([])
+    text = "\n".join(_help_lines(out))
+    assert "davinci-axi items` to list the items of Edit v1" in text
+    assert "davinci-axi timeline check --target <length>`" in text
+    assert "davinci-axi render start <job> --force` to start the 1 pending job(s)" in text
+    assert "davinci-axi render verify --job <id> --max-mb <mb>`" in text
+    assert "davinci-axi projects" not in text
+    assert "help[5]:" in out
+
+
+def test_no_project_hints_projects_and_open(run_cli: Run, fake_world: FakeWorld) -> None:
+    fake_world.resolve.pm.current_project = None
+    _, out, _ = run_cli([])
+    text = "\n".join(_help_lines(out))
+    assert "davinci-axi projects`" in text
+    assert "davinci-axi project open <name>`" in text
+    assert "davinci-axi items" not in text and "render start" not in text
+    assert "help[3]:" in out
+
+
+def test_no_timelines_hints_create_and_import(run_cli: Run, fake_world: FakeWorld) -> None:
+    project = fake_world.resolve.pm.current_project
+    assert project is not None
+    project.timelines.clear()
+    project.current_timeline = None
+    _, out, _ = run_cli([])
+    text = "\n".join(_help_lines(out))
+    assert "davinci-axi timelines`" in text
+    assert "davinci-axi timeline create <name> --force`" in text
+    assert "davinci-axi media import <files> --force`" in text
+    assert "davinci-axi items" not in text
+    assert len(_help_lines(out)) <= 5
+
+
+def test_registry_without_render_has_no_render_lines(
+    monkeypatch: pytest.MonkeyPatch, run_cli: Run, fake_world: FakeWorld
+) -> None:
+    monkeypatch.delitem(registry.COMMANDS, "render")
+    _, out, _ = run_cli([])
+    text = "\n".join(_help_lines(out))
+    assert "render start" not in text and "render verify" not in text
+    assert "davinci-axi items" in text
+
+
 def test_hints_only_name_registered_commands(
     monkeypatch: pytest.MonkeyPatch, run_cli: Run, fake_world: FakeWorld
 ) -> None:
-    for name in ("projects", "timelines", "items"):
-        monkeypatch.delitem(registry.COMMANDS, name, raising=False)
+    for name in ("items", "timeline"):
+        monkeypatch.delitem(registry.COMMANDS, name)
     _, out, _ = run_cli([])
-    assert "davinci-axi projects" not in out
-    monkeypatch.setitem(registry.COMMANDS, "projects", "x:y")
-    monkeypatch.setitem(registry.COMMANDS, "timelines", "x:y")
+    text = "\n".join(_help_lines(out))
+    assert "davinci-axi items" not in text and "davinci-axi timeline " not in text
+    assert "davinci-axi render start" in text
     monkeypatch.setitem(registry.COMMANDS, "items", "x:y")
-    _, out, _ = run_cli([])
-    assert "Run `davinci-axi projects` to list" in out
-    assert "Run `davinci-axi timelines` to list" in out
-    assert "davinci-axi items" not in out
-    assert "help[3]:" in out
+    assert "davinci-axi items" in "\n".join(_help_lines(run_cli([])[1]))
+
+
+@pytest.mark.parametrize("world", ["default", "no_project", "no_timelines"])
+def test_help_is_at_most_five_lines(run_cli: Run, fake_world: FakeWorld, world: str) -> None:
+    project = fake_world.resolve.pm.current_project
+    assert project is not None
+    if world == "no_project":
+        fake_world.resolve.pm.current_project = None
+    elif world == "no_timelines":
+        project.timelines.clear()
+        project.current_timeline = None
+    lines = _help_lines(run_cli([])[1])
+    assert 1 <= len(lines) <= 5
+    assert (
+        lines[-1].endswith("`davinci-axi --help` to list commands and flags")
+        or "--help" in lines[-1]
+    )
+
+
+def test_next_steps_unit() -> None:
+    from davinci_axi.commands.home import next_steps
+
+    assert next_steps({"project": None})[0].startswith("Run `davinci-axi projects`")
+    steps = next_steps(
+        {
+            "project": "p",
+            "timeline": "T",
+            "timeline_count": 1,
+            "render_pending": 2,
+            "render_complete": 3,
+        }
+    )
+    assert len(steps) == 4
+    assert "start the 2 pending job(s)" in steps[2]
 
 
 def test_home_never_loads_the_real_module(run_cli: Run, fake_world: FakeWorld) -> None:
@@ -144,3 +225,24 @@ def test_home_never_loads_the_real_module(run_cli: Run, fake_world: FakeWorld) -
 
     run_cli([])
     assert "DaVinciResolveScript" not in sys.modules
+
+
+def test_starting_home_says_so(run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld) -> None:
+    fake_world.connection = "starting"
+    fake_world.starting_answers = 99
+    exit_code, out, err = run_cli(["--timeout", "0.6"])
+    keys = parse_toon_keys(out)
+    assert (exit_code, err) == (0, "")
+    assert keys["resolve"] == "starting"
+    assert keys["code"] == "RESOLVE_STARTING"
+    assert "loading" in keys["fix"]
+    assert "\nhelp[" in out
+    assert "edition" not in keys
+
+
+def test_home_version_matches_the_version_flag(
+    run_cli: Run, parse_toon_keys: Keys, fake_world: FakeWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("davinci_axi.version.describe", lambda: "0.1.0+abc1234")
+    shown = parse_toon_keys(run_cli([])[1])["version"]
+    assert shown == run_cli(["--version"])[1].strip() == "0.1.0+abc1234"

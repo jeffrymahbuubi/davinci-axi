@@ -172,7 +172,8 @@ def test_transcribe_no_wait_returns_after_the_start_call(
 def test_transcribe_false_return_is_not_available(run_cli: Run, fake_world: FakeWorld) -> None:
     fake_world.inject("MediaPoolItem.TranscribeAudio", False)
     code, out, _ = run_cli(["audio", "transcribe", "A001_beach", *POLL, "--force"])
-    assert code == 1 and "NOT_AVAILABLE" in out and "AI Extras" in out
+    assert code == 1 and "NOT_AVAILABLE" in out and "clip A001_beach" in out
+    assert "AI Extras" not in out
     assert "snapshot" in out  # the snapshot was taken, then the call refused
 
 

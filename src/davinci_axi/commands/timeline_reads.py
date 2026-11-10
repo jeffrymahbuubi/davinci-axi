@@ -72,6 +72,8 @@ def run_show(inv: Invocation) -> Result:
         lines.append(
             hint(f"items --timeline {shlex.quote(name)}", "list the items of this timeline")
         )
+    if data["markers"] and "timeline" in registry.COMMANDS:
+        lines.append(hint("timeline marker list", "read the markers' names, notes and colours"))
     if video_block is not None and video_item is not None and "item" in registry.COMMANDS:
         ref = _position(timeline, str(video_block["id"])) or str(video_block["id"])
         lines.append(hint(f"item {ref}", "show the current video item in detail"))

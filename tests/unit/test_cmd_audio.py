@@ -84,12 +84,12 @@ def test_normalize_force_makes_one_call_with_both_items_and_the_options(
 
 
 def test_normalize_passes_the_enum_and_a_valid_mode(run_cli: Run, fake_world: FakeWorld) -> None:
-    args = ["audio", "normalize", "A1:1", "--mode", "LUFS", "--level", "-9", "--independent"]
+    args = ["audio", "normalize", "A1:1", "--mode", "EBU R128", "--level", "-9", "--independent"]
     code, _, _ = run_cli([*args, "--force"])
     assert code == 0
     options = fake_world.calls_to("Timeline.NormalizeAudioLevel")[0][1]
     assert options == {
-        "normalizationMode": "LUFS",
+        "normalizationMode": "EBU R128",
         "targetLevel": -9.0,
         "setLevelMode": _enum(fake_world, "NORMALIZE_AUDIO_SET_LEVEL_INDEPENDENT"),
     }
@@ -99,7 +99,7 @@ def test_normalize_unknown_mode_exits_2_after_connecting_and_writes_nothing(
     run_cli: Run, fake_world: FakeWorld, tmp_path: Path
 ) -> None:
     code, out, _ = run_cli(["audio", "normalize", "A1:1", "--mode", "Loudest", "--force"])
-    assert code == 2 and "Valid modes: Sample Peak, True Peak, LUFS" in out
+    assert code == 2 and "Valid modes: Sample Peak Program, True Peak, ITU-R BS.1770-1" in out
     _untouched(fake_world, tmp_path)
 
 
@@ -111,6 +111,92 @@ def test_normalize_unknown_item_is_not_found_and_a_false_return_is_not_available
     fake_world.inject("Timeline.NormalizeAudioLevel", False)
     code, out, _ = run_cli(["audio", "normalize", "A1:1", "--force"])
     assert code == 1 and "NOT_AVAILABLE" in out and "Studio" in out
+
+
+def _json(out: str) -> dict[str, object]:
+    data = json.loads(out)
+    assert isinstance(data, dict)
+    return data
+
+
+def test_normalize_list_modes_prints_the_14_modes_and_writes_nothing(
+    run_cli: Run, fake_world: FakeWorld, tmp_path: Path
+) -> None:
+    code, out, err = run_cli(["audio", "normalize", "--list-modes", "--json"])
+    data = _json(out)
+    assert (code, err) == (0, "")
+    modes = data["modes"]
+    assert isinstance(modes, list) and len(modes) == 14 and "EBU R128" in modes
+    assert data["default"] == "Sample Peak Program"
+    assert fake_world.calls_to("Timeline.NormalizeAudioLevel") == []
+    _untouched(fake_world, tmp_path)
+
+
+def test_normalize_without_items_or_list_modes_exits_2_before_connecting(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    code, out, _ = run_cli(["audio", "normalize"])
+    assert code == 2 and "--list-modes" in out and fake_world.calls == []
+
+
+def test_normalize_dry_run_reads_the_volumes_before_and_states_what_it_measures(
+    run_cli: Run,
+) -> None:
+    code, out, _ = run_cli(["audio", "normalize", "A1:1,A1:2", "--loudness", "-24", "--json"])
+    data = _json(out)
+    assert code == 0 and data["volume_before"] == "A1:1=0, A1:2=0"
+    assert "volume_after" not in data
+    assert str(data["scope"]).startswith("relative") and "clip level" in str(data["measures"])
+    assert "no loudness meter" in str(data["readback"])
+    _, out, _ = run_cli(["audio", "normalize", "A1:1", "--independent", "--json"])
+    data = _json(out)
+    assert str(data["scope"]).startswith("independent") and "INDEPENDENT" in str(data["options"])
+
+
+def test_normalize_force_reads_the_volumes_after(run_cli: Run) -> None:
+    args = ["audio", "normalize", "A1:1,A1:2", "--loudness", "-24", "--force", "--json"]
+    code, out, _ = run_cli(args)
+    data = _json(out)
+    assert code == 0 and data["volume_before"] == "A1:1=0, A1:2=0"
+    assert data["volume_after"] == "A1:1=-24, A1:2=-24" and "unchanged" not in data
+
+
+def test_normalize_that_moves_nothing_lists_the_unchanged_items(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    fake_world.inject("Timeline.NormalizeAudioLevel", True)
+    code, out, _ = run_cli(["audio", "normalize", "A1:1,A1:2", "--force", "--json"])
+    data = _json(out)
+    assert code == 0 and data["unchanged"] == ["A1:1", "A1:2"]
+    assert "No clip volume changed" in out and "measure the render offline" in out
+
+
+def test_normalize_reports_items_without_a_readable_volume(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    _timeline(fake_world).tracks["audio"][0].items[0].properties = {}
+    args = ["audio", "normalize", "A1:1,A1:2", "--loudness", "-24", "--json"]
+    code, out, _ = run_cli(args)
+    assert code == 0 and _json(out)["volume_before"] == "A1:1=not readable, A1:2=0"
+    code, out, _ = run_cli([*args, "--force"])
+    data = _json(out)
+    assert code == 0 and data["applied"] is True
+    assert data["volume_after"] == "A1:1=-24, A1:2=-24"  # the fake writes it; Resolve may not
+    assert data["not_readable"] == ["A1:1"] and "unchanged" not in data
+
+
+def test_normalize_with_a_volume_that_stays_unreadable_is_neither_changed_nor_a_failure(
+    run_cli: Run, fake_world: FakeWorld
+) -> None:
+    for item in _timeline(fake_world).tracks["audio"][0].items:
+        item.properties = {}
+    fake_world.inject("Timeline.NormalizeAudioLevel", True)
+    code, out, _ = run_cli(["audio", "normalize", "A1:1,A1:2", "--force", "--json"])
+    data = _json(out)
+    assert code == 0 and data["applied"] is True
+    assert data["volume_after"] == "A1:1=not readable, A1:2=not readable"
+    assert data["not_readable"] == ["A1:1", "A1:2"] and "unchanged" not in data
+    assert "not readable on some items" in out
 
 
 # ---------------------------------------------------------------- align

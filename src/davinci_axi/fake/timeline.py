@@ -32,6 +32,25 @@ _VIDEO_PROPERTIES: dict[str, Any] = {
 _AUDIO_PROPERTIES: dict[str, Any] = {"AudioVolume": 0.0, "AudioPan": 0.0}
 
 
+# Resolve 21.1.1's live list (davinci-edit-video feedback F26a)
+NORMALIZE_MODES = (
+    "Sample Peak Program",
+    "True Peak",
+    "ITU-R BS.1770-1",
+    "ITU-R BS.1770-4",
+    "ATSC A/85",
+    "EBU R128",
+    "OP-59",
+    "TR-B32",
+    "AGCOM 219/09/CSP",
+    "Netflix",
+    "YouTube",
+    "Disney - 2.0",
+    "Disney - 5.1+",
+    "TencentVideo",
+)
+
+
 class FakeTimelineItem(FakeBase):
     CLASS = "TimelineItem"
 
@@ -92,11 +111,16 @@ class FakeTimelineItem(FakeBase):
     def GetDuration(self, subframePrecision: bool = False) -> float:
         return self._ret("GetDuration", float(self.duration), subframePrecision)
 
-    def GetLeftOffset(self, subframePrecision: bool = False) -> float:
-        return self._ret("GetLeftOffset", float(self.source_start), subframePrecision)
+    def _is_transition(self) -> bool:
+        return self.kind.lower() == "transition"
 
-    def GetRightOffset(self, subframePrecision: bool = False) -> float:
-        return self._ret("GetRightOffset", 0.0, subframePrecision)
+    def GetLeftOffset(self, subframePrecision: bool = False) -> float | None:
+        default = None if self._is_transition() else float(self.source_start)
+        return self._ret("GetLeftOffset", default, subframePrecision)
+
+    def GetRightOffset(self, subframePrecision: bool = False) -> float | None:
+        default = None if self._is_transition() else 0.0
+        return self._ret("GetRightOffset", default, subframePrecision)
 
     def GetSourceStartFrame(self) -> int:
         return self._ret("GetSourceStartFrame", self.source_start)
@@ -104,11 +128,13 @@ class FakeTimelineItem(FakeBase):
     def GetSourceEndFrame(self) -> int:
         return self._ret("GetSourceEndFrame", self.source_start + self.duration)
 
-    def GetSourceStartTime(self) -> float:
-        return self._ret("GetSourceStartTime", self.source_start / 24)
+    def GetSourceStartTime(self) -> float | None:
+        default = None if self._is_transition() else self.source_start / 24
+        return self._ret("GetSourceStartTime", default)
 
-    def GetSourceEndTime(self) -> float:
-        return self._ret("GetSourceEndTime", (self.source_start + self.duration) / 24)
+    def GetSourceEndTime(self) -> float | None:
+        default = None if self._is_transition() else (self.source_start + self.duration) / 24
+        return self._ret("GetSourceEndTime", default)
 
     def GetMediaPoolItem(self) -> FakeMediaPoolItem | None:
         return self._ret("GetMediaPoolItem", self.media)
@@ -152,8 +178,9 @@ class FakeTimelineItem(FakeBase):
     def GetSelectedTakeIndex(self) -> int:
         return self._ret("GetSelectedTakeIndex", self.selected_take)
 
-    def GetTakesCount(self) -> int:
-        return self._ret("GetTakesCount", len(self.takes))
+    def GetTakesCount(self) -> int | None:
+        none = self.track_type == "audio" and not self.takes
+        return self._ret("GetTakesCount", None if none else len(self.takes))
 
     def GetTakeByIndex(self, idx: int) -> dict[str, Any] | None:
         take = self.takes[idx - 1] if 1 <= idx <= len(self.takes) else None
@@ -333,7 +360,7 @@ class FakeTimeline(FakeBase):
         return self._ret("GetMarkInOut", dict(self.mark_in_out))
 
     def GetNormalizeAudioModes(self) -> list[str]:
-        return self._ret("GetNormalizeAudioModes", ["Sample Peak", "True Peak", "LUFS"])
+        return self._ret("GetNormalizeAudioModes", list(NORMALIZE_MODES))
 
     def GetOutputBlanking(self) -> dict[str, Any]:
         return self._ret("GetOutputBlanking", {})
